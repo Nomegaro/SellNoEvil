@@ -3,4 +3,4 @@
 #include "SellNoEvil.h"
 #include "Modules/ModuleManager.h"
 
-IMPLEMENT_PRIMARY_GAME_MODULE( FDefaultGameModuleImpl, SellNoEvil, "SellNoEvil" );
+IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultGameModuleImpl, SellNoEvil, "SellNoEvil");

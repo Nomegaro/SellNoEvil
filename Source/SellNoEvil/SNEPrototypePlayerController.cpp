@@ -20,9 +20,15 @@ void ASNEPrototypePlayerController::BeginPlay()
 	{
 		if (USNEDialogueGameSubsystem* DialogueSubsystem = GameInstance->GetSubsystem<USNEDialogueGameSubsystem>())
 		{
-			if (const ASNEPrototypeGameMode* SNEGameMode = GetWorld() != nullptr ? GetWorld()->GetAuthGameMode<ASNEPrototypeGameMode>() : nullptr)
+			const AGameModeBase* ActiveGameMode = GetWorld() != nullptr ? GetWorld()->GetAuthGameMode() : nullptr;
+			if (const ASNEPrototypeGameMode* SNEGameMode = Cast<ASNEPrototypeGameMode>(ActiveGameMode))
 			{
 				DialogueSubsystem->SetRootWidgetClass(SNEGameMode->RootWidgetClass);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("SNE: Active GameMode is not ASNEPrototypeGameMode (%s). Using subsystem default root widget class."),
+					*GetNameSafe(ActiveGameMode));
 			}
 			DialogueSubsystem->EnsureUIForPlayerController(this);
 			DialogueSubsystem->StartDayIfNeeded();
