@@ -260,6 +260,17 @@ bool USNEDialogueGameSubsystem::TryInvestigate()
 		return false;
 	}
 
+	if (!RuntimeContentAsset->Customers.IsValidIndex(ScenarioIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: TryInvestigate aborted due to invalid scenario index %d."), ScenarioIndex);
+		LastEventText = LOCTEXT("InvestigateInvalidEncounter", "Could not investigate because encounter data is missing.");
+		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
+		RebuildPresentation();
+		BroadcastPresentation();
+		return false;
+	}
+
 	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ScenarioIndex];
 	Energy = FMath::Clamp(Energy - RuntimeContentAsset->Defaults.InvestigateEnergyCost, 0, RuntimeContentAsset->Defaults.MaxEnergy);
 
@@ -1029,6 +1040,18 @@ void USNEDialogueGameSubsystem::BuildShiftEncounterPresentation()
 		? LOCTEXT("HeaderMorningShift", "Morning Shift")
 		: LOCTEXT("HeaderEveningShift", "Evening Shift");
 
+	if (RuntimeContentAsset == nullptr || RuntimeContentAsset->Customers.Num() == 0)
+	{
+		PresentationCache.BodyText = LOCTEXT("ShiftNoCustomersConfigured", "No customer scenarios are configured.");
+		FSNEChoiceData Choice;
+		Choice.Label = LOCTEXT("ShiftNoCustomersContinue", "Continue");
+		Choice.ChoiceType = ESNEChoiceType::AdvancePhase;
+		PresentationCache.Choices = {Choice};
+		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
+		return;
+	}
+
 	if (ActiveEncounter.ScenarioIndex == INDEX_NONE)
 	{
 		PresentationCache.BodyText = LOCTEXT("ShiftNoEncounter", "No more highlighted customers in this shift.");
@@ -1036,6 +1059,20 @@ void USNEDialogueGameSubsystem::BuildShiftEncounterPresentation()
 		Choice.Label = LOCTEXT("ShiftNoEncounterContinue", "Continue");
 		Choice.ChoiceType = ESNEChoiceType::AdvancePhase;
 		PresentationCache.Choices = {Choice};
+		ActiveEncounter.bResolved = true;
+		return;
+	}
+
+	if (!RuntimeContentAsset->Customers.IsValidIndex(ActiveEncounter.ScenarioIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: Invalid active scenario index %d (Customers=%d)."), ActiveEncounter.ScenarioIndex, RuntimeContentAsset->Customers.Num());
+		PresentationCache.BodyText = LOCTEXT("ShiftInvalidEncounterData", "Encounter data is missing. Continuing.");
+		FSNEChoiceData Choice;
+		Choice.Label = LOCTEXT("ShiftInvalidEncounterContinue", "Continue");
+		Choice.ChoiceType = ESNEChoiceType::AdvancePhase;
+		PresentationCache.Choices = {Choice};
+		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
 		return;
 	}
 
@@ -1108,6 +1145,16 @@ void USNEDialogueGameSubsystem::StartNextEncounterIfNeeded()
 	if (ResolvedCount >= TargetCount)
 	{
 		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
+		return;
+	}
+
+	if (RuntimeContentAsset->Customers.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: No customers configured; skipping remaining shift encounters."));
+		ResolvedCount = TargetCount;
+		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
 		return;
 	}
 
@@ -1117,10 +1164,31 @@ void USNEDialogueGameSubsystem::StartNextEncounterIfNeeded()
 		CurrentEncounterOrderIndex = 0;
 	}
 
-	const int32 ScenarioIndex = DailyCustomerOrder.IsValidIndex(CurrentEncounterOrderIndex)
-		? DailyCustomerOrder[CurrentEncounterOrderIndex]
-		: RandomStream.RandRange(0, RuntimeContentAsset->Customers.Num() - 1);
+	int32 ScenarioIndex = INDEX_NONE;
+	if (DailyCustomerOrder.IsValidIndex(CurrentEncounterOrderIndex))
+	{
+		const int32 OrderedIndex = DailyCustomerOrder[CurrentEncounterOrderIndex];
+		if (RuntimeContentAsset->Customers.IsValidIndex(OrderedIndex))
+		{
+			ScenarioIndex = OrderedIndex;
+		}
+	}
+	if (ScenarioIndex == INDEX_NONE && RuntimeContentAsset->Customers.Num() > 0)
+	{
+		ScenarioIndex = RandomStream.RandRange(0, RuntimeContentAsset->Customers.Num() - 1);
+	}
 	++CurrentEncounterOrderIndex;
+
+	if (!RuntimeContentAsset->Customers.IsValidIndex(ScenarioIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: Could not select a valid customer scenario. Customers=%d OrderSize=%d."),
+			RuntimeContentAsset->Customers.Num(),
+			DailyCustomerOrder.Num());
+		ResolvedCount = TargetCount;
+		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
+		return;
+	}
 
 	ActiveEncounter = FSNEActiveEncounter{};
 	ActiveEncounter.ScenarioIndex = ScenarioIndex;
@@ -1134,6 +1202,18 @@ void USNEDialogueGameSubsystem::FinalizeCurrentEncounter(const bool bSold)
 {
 	if (RuntimeContentAsset == nullptr || ActiveEncounter.ScenarioIndex == INDEX_NONE)
 	{
+		return;
+	}
+
+	if (!RuntimeContentAsset->Customers.IsValidIndex(ActiveEncounter.ScenarioIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: FinalizeCurrentEncounter aborted due to invalid scenario index %d."), ActiveEncounter.ScenarioIndex);
+		LastEventText = LOCTEXT("FinalizeInvalidEncounter", "Encounter data was missing. Continuing shift.");
+		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
+		int32& ResolvedCount = CurrentPhase == ESNEDayPhase::MorningShift ? MorningResolvedCount : EveningResolvedCount;
+		const int32 TargetCount = GetRequiredEncountersForCurrentShift();
+		ResolvedCount = FMath::Clamp(ResolvedCount + 1, 0, TargetCount);
 		return;
 	}
 
