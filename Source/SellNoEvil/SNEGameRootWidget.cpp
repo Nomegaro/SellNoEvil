@@ -432,7 +432,7 @@ void USNEGameRootWidget::UpdateTextBlocks(const FSNEPresentationData& Data)
 	if (MeterText != nullptr)
 	{
 		MeterText->SetText(FText::Format(
-			LOCTEXT("CompactMeterFmt", "Cash {0} MNT | E {1}/{2} | Stress {3} | Conscience {4} | Tip {5}%"),
+			LOCTEXT("CompactMeterFmt", "Cash {0} MNT | E {1}/{2} | Sanity {3} | Morality {4} | Tip {5}%"),
 			FText::AsNumber(Data.Money),
 			FText::AsNumber(Data.Energy),
 			FText::AsNumber(MaxEnergy),

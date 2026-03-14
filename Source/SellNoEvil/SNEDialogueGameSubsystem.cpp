@@ -88,7 +88,7 @@ namespace SNESubsystemInternal
 		}
 		else if (DeferredEthicsDelta.Sanity < 0)
 		{
-			Reflection = LOCTEXT("DeferredNewsReflectSanityDown", "You can explain your choice, but your stress is higher.");
+			Reflection = LOCTEXT("DeferredNewsReflectSanityDown", "You can explain your choice, but your sanity is lower.");
 		}
 		else if (DeferredEthicsDelta.Morality < 0)
 		{
