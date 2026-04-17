@@ -8,17 +8,15 @@
 #include "SNEDialogueGameSubsystem.h"
 #include "SNEGameRootWidget.generated.h"
 
-class UButton;
-class UBorder;
 class UHorizontalBox;
-class UScrollBox;
+class UPanelWidget;
+class USNEIndexedButton;
 class UTextBlock;
-class UVerticalBox;
 class USNEDialogueGameSubsystem;
 struct FGeometry;
 struct FKeyEvent;
 
-UCLASS(BlueprintType)
+UCLASS(Abstract, BlueprintType)
 class SELLNOEVIL_API USNEGameRootWidget : public UUserWidget
 {
 	GENERATED_BODY()
@@ -28,82 +26,74 @@ public:
 	void RefreshFromSubsystem();
 
 protected:
-	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void NativeConstruct() override;
 	virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
 
+	// Designer-authored class used to spawn each choice button inside ChoiceListBox.
+	// Must derive from USNEIndexedButton. Set this on the WBP in the editor.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "SNE|UI")
+	TSubclassOf<USNEIndexedButton> ChoiceButtonClass;
+
+	// Optional BlueprintImplementableEvent hook for designers who want to react to
+	// presentation changes in Blueprint (e.g., play animations) in addition to the
+	// default text/choice sync.
+	UFUNCTION(BlueprintImplementableEvent, Category = "SNE|UI", meta = (DisplayName = "On Presentation Refreshed"))
+	void BP_OnPresentationRefreshed(const FSNEPresentationData& PresentationData);
+
 private:
-	void BuildLayoutIfNeeded();
-	void WireChoiceHandlers();
+	void EnsureChoiceWidgets(int32 RequiredCount);
 	int32 FindFirstEnabledChoiceIndex() const;
+	int32 FindNextEnabledChoiceIndex(int32 StartIndex, int32 Direction) const;
+	void MoveChoiceSelection(int32 Direction);
 	USNEDialogueGameSubsystem* GetDialogueSubsystem() const;
-	void HandleChoiceClicked(int32 ChoiceIndex);
+	bool HandleChoiceClicked(int32 ChoiceIndex);
 	void SyncChoiceButtons(const FSNEPresentationData& Data);
 	void UpdateTextBlocks(const FSNEPresentationData& Data);
 
 	UFUNCTION()
-	void HandleChoice0();
-
-	UFUNCTION()
-	void HandleChoice1();
-
-	UFUNCTION()
-	void HandleChoice2();
-
-	UFUNCTION()
-	void HandleChoice3();
-
-	UFUNCTION()
-	void HandleChoice4();
-
-	UFUNCTION()
-	void HandleChoice5();
+	void HandleIndexedChoiceClicked(int32 ChoiceIndex);
 
 	UFUNCTION()
 	void HandleSubsystemPresentationChanged();
 
-	UPROPERTY(Transient)
-	TObjectPtr<UVerticalBox> RootBox;
-
-	UPROPERTY(Transient)
-	TObjectPtr<UBorder> RootBorder;
-
-	UPROPERTY(Transient)
+	// UMG-bound widgets. Names must match widgets placed in the designer-authored WBP.
+	// OptionalBindWidget means the WBP may omit any of these; C++ no-ops gracefully.
+	UPROPERTY(Transient, meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> HeaderText;
 
-	UPROPERTY(Transient)
+	UPROPERTY(Transient, meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> DayPhaseText;
 
-	UPROPERTY(Transient)
+	UPROPERTY(Transient, meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> MeterText;
 
-	UPROPERTY(Transient)
+	UPROPERTY(Transient, meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> CustomerText;
 
-	UPROPERTY(Transient)
-	TObjectPtr<UScrollBox> NarrativeScrollBox;
-
-	UPROPERTY(Transient)
-	TObjectPtr<UVerticalBox> NarrativeBox;
-
-	UPROPERTY(Transient)
+	UPROPERTY(Transient, meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> BodyText;
 
-	UPROPERTY(Transient)
+	UPROPERTY(Transient, meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> ClueText;
 
-	UPROPERTY(Transient)
+	UPROPERTY(Transient, meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> ActionHeaderText;
 
-	UPROPERTY(Transient)
-	TObjectPtr<UHorizontalBox> ChoiceListBox;
+	// Container that holds the dynamically spawned choice buttons. Must be a UPanelWidget
+	// (e.g. HorizontalBox, VerticalBox, WrapBox) in the authored WBP.
+	UPROPERTY(Transient, meta = (BindWidget))
+	TObjectPtr<UPanelWidget> ChoiceListBox;
 
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<UButton>> ChoiceButtons;
+	TArray<TObjectPtr<USNEIndexedButton>> ChoiceButtons;
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UTextBlock>> ChoiceLabels;
 
 	UPROPERTY(Transient)
 	TObjectPtr<USNEDialogueGameSubsystem> CachedSubsystem;
+
+	FSNEPresentationData LastPresentationData;
+	bool bHasPresentationData = false;
+	int32 SelectedChoiceIndex = INDEX_NONE;
 };

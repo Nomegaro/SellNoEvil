@@ -2,7 +2,6 @@
 
 #include "SNEPrototypeGameMode.h"
 
-#include "SNEGameRootWidget.h"
 #include "SNEPrototypePlayerController.h"
 
 ASNEPrototypeGameMode::ASNEPrototypeGameMode()
@@ -10,5 +9,6 @@ ASNEPrototypeGameMode::ASNEPrototypeGameMode()
 	PlayerControllerClass = ASNEPrototypePlayerController::StaticClass();
 	DefaultPawnClass = nullptr;
 	HUDClass = nullptr;
-	RootWidgetClass = USNEGameRootWidget::StaticClass();
+	// RootWidgetClass intentionally left null. Assign a WBP derived from USNEGameRootWidget
+	// on a Blueprint subclass of this GameMode (or on the GameMode asset).
 }

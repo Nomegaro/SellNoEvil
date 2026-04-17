@@ -98,6 +98,9 @@ struct FSNECustomerScenario
 	float TipChanceMultiplier = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Customer")
+	float GoodIntentChance = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Customer")
 	FText OpeningDialogue;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Customer")
@@ -191,6 +194,9 @@ struct FSNEPrototypeDefaults
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults")
+	int32 StartingDayNumber = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults")
 	int32 StartingMoney = 50000;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults")
@@ -219,6 +225,21 @@ struct FSNEPrototypeDefaults
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults")
 	int32 EveningCustomerCount = 2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults|Intent")
+	float MoralityGoodIntentInfluence = 0.002f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults|Intent")
+	float SanityGoodIntentInfluence = 0.001f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults|Intent")
+	int32 LowMoneyThresholdForRisk = 30000;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults|Intent")
+	float LowMoneyGoodIntentPenalty = 0.08f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults|Intent")
+	float DirtyStoreGoodIntentPenalty = 0.05f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Defaults")
 	bool bStartWithCleanStore = true;

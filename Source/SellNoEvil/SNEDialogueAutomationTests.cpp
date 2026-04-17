@@ -247,19 +247,20 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FSNEContentIntegrityTest::RunTest(const FString& Parameters)
 {
-	USNEPrototypeContentAsset* Content = USNEPrototypeContentAsset::CreateRuntimeDefaultContent(GetTransientPackage());
-	TestNotNull(TEXT("Default content should be created"), Content);
+	USNEPrototypeContentAsset* Content = LoadObject<USNEPrototypeContentAsset>(nullptr, TEXT("/Game/Data/DA_SNEPrototypeContent.DA_SNEPrototypeContent"));
+	TestNotNull(TEXT("Authored DA_SNEPrototypeContent should load from /Game/Data/"), Content);
 	if (Content == nullptr)
 	{
 		return false;
 	}
 
-	TestTrue(TEXT("Prototype should include at least five customers"), Content->Customers.Num() >= 5);
+	TestTrue(TEXT("Authored content should include at least five customers"), Content->Customers.Num() >= 5);
 	for (const FSNECustomerScenario& Customer : Content->Customers)
 	{
 		TestTrue(FString::Printf(TEXT("%s neutral clues should not be empty"), *Customer.Id.ToString()), Customer.NeutralClues.Num() > 0);
 		TestTrue(FString::Printf(TEXT("%s good clues should not be empty"), *Customer.Id.ToString()), Customer.GoodLeaningClues.Num() > 0);
 		TestTrue(FString::Printf(TEXT("%s bad clues should not be empty"), *Customer.Id.ToString()), Customer.BadLeaningClues.Num() > 0);
+		TestTrue(FString::Printf(TEXT("%s good intent chance should be in [0,1]"), *Customer.Id.ToString()), Customer.GoodIntentChance >= 0.0f && Customer.GoodIntentChance <= 1.0f);
 		TestFalse(FString::Printf(TEXT("%s sell good immediate text should not be empty"), *Customer.Id.ToString()), Customer.SellGoodIntentOutcome.ImmediateText.IsEmpty());
 		TestFalse(FString::Printf(TEXT("%s sell bad immediate text should not be empty"), *Customer.Id.ToString()), Customer.SellBadIntentOutcome.ImmediateText.IsEmpty());
 		TestFalse(FString::Printf(TEXT("%s no-sell good immediate text should not be empty"), *Customer.Id.ToString()), Customer.NoSellGoodIntentOutcome.ImmediateText.IsEmpty());

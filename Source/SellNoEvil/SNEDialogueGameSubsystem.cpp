@@ -53,6 +53,33 @@ namespace SNESubsystemInternal
 		return FString::Join(Parts, TEXT(" | "));
 	}
 
+	static float ComputeGoodIntentChance(
+		const FSNECustomerScenario& Scenario,
+		const FSNEPrototypeDefaults& Defaults,
+		const int32 InSanity,
+		const int32 InMorality,
+		const int32 InMoney,
+		const bool bInStoreCleanForTomorrow)
+	{
+		float GoodIntentChance = FMath::Clamp(Scenario.GoodIntentChance, 0.05f, 0.95f);
+
+		const float MoralityShift = FMath::Clamp(static_cast<float>(InMorality) * Defaults.MoralityGoodIntentInfluence, -0.20f, 0.20f);
+		const float SanityShift = FMath::Clamp(static_cast<float>(InSanity) * Defaults.SanityGoodIntentInfluence, -0.15f, 0.15f);
+		GoodIntentChance += MoralityShift + SanityShift;
+
+		if (InMoney <= Defaults.LowMoneyThresholdForRisk)
+		{
+			GoodIntentChance -= FMath::Max(0.0f, Defaults.LowMoneyGoodIntentPenalty);
+		}
+
+		if (!bInStoreCleanForTomorrow)
+		{
+			GoodIntentChance -= FMath::Max(0.0f, Defaults.DirtyStoreGoodIntentPenalty);
+		}
+
+		return FMath::Clamp(GoodIntentChance, 0.05f, 0.95f);
+	}
+
 	static FText BuildDeferredEthicsNewsText(
 		const FSNECustomerScenario& Scenario,
 		const bool bSold,
@@ -128,7 +155,7 @@ void USNEDialogueGameSubsystem::StartDay()
 
 	const FSNEPrototypeDefaults& Defaults = RuntimeContentAsset->Defaults;
 
-	DayNumber = 1;
+	DayNumber = FMath::Max(1, Defaults.StartingDayNumber);
 	CurrentPhase = ESNEDayPhase::MorningNews;
 	Money = Defaults.StartingMoney;
 	Energy = Defaults.StartingEnergy;
@@ -586,9 +613,10 @@ void USNEDialogueGameSubsystem::EnsureUIForPlayerController(APlayerController* P
 	if (!IsValid(ActiveRootWidget))
 	{
 		TSubclassOf<UUserWidget> WidgetClassToUse = PreferredRootWidgetClass;
-		if (WidgetClassToUse == nullptr)
+		if (WidgetClassToUse == nullptr || WidgetClassToUse->HasAnyClassFlags(CLASS_Abstract))
 		{
-			WidgetClassToUse = USNEGameRootWidget::StaticClass();
+			UE_LOG(LogTemp, Warning, TEXT("SNE: No concrete root widget class set. Assign PreferredRootWidgetClass to a WBP derived from USNEGameRootWidget."));
+			return;
 		}
 		ActiveRootWidget = CreateWidget<UUserWidget>(PlayerController, WidgetClassToUse);
 		if (IsValid(ActiveRootWidget))
@@ -1192,7 +1220,15 @@ void USNEDialogueGameSubsystem::StartNextEncounterIfNeeded()
 
 	ActiveEncounter = FSNEActiveEncounter{};
 	ActiveEncounter.ScenarioIndex = ScenarioIndex;
-	ActiveEncounter.Intent = RandomStream.FRand() < 0.5f ? ESNECustomerIntent::Good : ESNECustomerIntent::Bad;
+	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ScenarioIndex];
+	const float GoodIntentChance = SNESubsystemInternal::ComputeGoodIntentChance(
+		Scenario,
+		RuntimeContentAsset->Defaults,
+		Sanity,
+		Morality,
+		Money,
+		bStoreCleanForTomorrow);
+	ActiveEncounter.Intent = RandomStream.FRand() < GoodIntentChance ? ESNECustomerIntent::Good : ESNECustomerIntent::Bad;
 	ActiveEncounter.bInvestigated = false;
 	ActiveEncounter.bResolved = false;
 	ActiveEncounter.VisibleClues.Reset();
