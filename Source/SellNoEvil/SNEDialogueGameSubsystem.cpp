@@ -6,7 +6,13 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/PlatformFileManager.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "SNEGameRootWidget.h"
 
 #define LOCTEXT_NAMESPACE "SNEDialogueSubsystem"
@@ -54,14 +60,14 @@ namespace SNESubsystemInternal
 	}
 
 	static float ComputeGoodIntentChance(
-		const FSNECustomerScenario& Scenario,
+		const float VisitGoodIntentChance,
 		const FSNEPrototypeDefaults& Defaults,
 		const int32 InSanity,
 		const int32 InMorality,
 		const int32 InMoney,
 		const bool bInStoreCleanForTomorrow)
 	{
-		float GoodIntentChance = FMath::Clamp(Scenario.GoodIntentChance, 0.05f, 0.95f);
+		float GoodIntentChance = FMath::Clamp(VisitGoodIntentChance, 0.05f, 0.95f);
 
 		const float MoralityShift = FMath::Clamp(static_cast<float>(InMorality) * Defaults.MoralityGoodIntentInfluence, -0.20f, 0.20f);
 		const float SanityShift = FMath::Clamp(static_cast<float>(InSanity) * Defaults.SanityGoodIntentInfluence, -0.15f, 0.15f);
@@ -82,6 +88,7 @@ namespace SNESubsystemInternal
 
 	static FText BuildDeferredEthicsNewsText(
 		const FSNECustomerScenario& Scenario,
+		const FText& ItemDisplayName,
 		const bool bSold,
 		const ESNECustomerIntent Intent,
 		const FSNEMeterDelta& DeferredEthicsDelta)
@@ -135,7 +142,7 @@ namespace SNESubsystemInternal
 			Headline,
 			Reflection,
 			Scenario.Nickname,
-			Scenario.ItemRequested);
+			ItemDisplayName);
 	}
 }
 
@@ -175,6 +182,8 @@ void USNEDialogueGameSubsystem::StartDay()
 	LastEventText = FText::GetEmpty();
 	PendingDelayedOutcomes.Reset();
 	ActiveEncounter = FSNEActiveEncounter{};
+	// StartDay (including RestartDay) wipes recurring-character memory. StartNextDay preserves it.
+	CustomerHistories.Reset();
 
 	BuildDailyCustomerOrder();
 	bHasStartedDay = true;
@@ -299,16 +308,24 @@ bool USNEDialogueGameSubsystem::TryInvestigate()
 	}
 
 	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ScenarioIndex];
+	if (!Scenario.Visits.IsValidIndex(ActiveEncounter.VisitIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: TryInvestigate aborted due to invalid visit index %d on scenario %s."), ActiveEncounter.VisitIndex, *Scenario.Id.ToString());
+		LastEventText = LOCTEXT("InvestigateInvalidVisit", "Could not investigate because visit data is missing.");
+		return false;
+	}
+	const FSNECustomerVisit& Visit = Scenario.Visits[ActiveEncounter.VisitIndex];
+
 	Energy = FMath::Clamp(Energy - RuntimeContentAsset->Defaults.InvestigateEnergyCost, 0, RuntimeContentAsset->Defaults.MaxEnergy);
 
-	TArray<FText> Pool = Scenario.NeutralClues;
+	TArray<FText> Pool = Visit.NeutralClues;
 	if (ActiveEncounter.Intent == ESNECustomerIntent::Good)
 	{
-		Pool.Append(Scenario.GoodLeaningClues);
+		Pool.Append(Visit.GoodLeaningClues);
 	}
 	else
 	{
-		Pool.Append(Scenario.BadLeaningClues);
+		Pool.Append(Visit.BadLeaningClues);
 	}
 
 	ActiveEncounter.VisibleClues.Reset();
@@ -576,12 +593,7 @@ int32 USNEDialogueGameSubsystem::GetActiveScenarioIndexForTesting() const
 
 int32 USNEDialogueGameSubsystem::GetActiveSaleValueForTesting() const
 {
-	if (RuntimeContentAsset == nullptr || !RuntimeContentAsset->Customers.IsValidIndex(ActiveEncounter.ScenarioIndex))
-	{
-		return 0;
-	}
-
-	return RuntimeContentAsset->GetSaleValue(RuntimeContentAsset->Customers[ActiveEncounter.ScenarioIndex].PriceTier);
+	return GetSaleValue(GetActiveEncounterItem());
 }
 
 void USNEDialogueGameSubsystem::DebugApplyMorningNewsNow()
@@ -1105,8 +1117,12 @@ void USNEDialogueGameSubsystem::BuildShiftEncounterPresentation()
 	}
 
 	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ActiveEncounter.ScenarioIndex];
+	const FSNECustomerVisit* VisitPtr = Scenario.Visits.IsValidIndex(ActiveEncounter.VisitIndex)
+		? &Scenario.Visits[ActiveEncounter.VisitIndex]
+		: nullptr;
+	const FText ItemTitle = ResolveItemDisplayName(GetActiveEncounterItem());
 	PresentationCache.CustomerTitle = Scenario.Nickname;
-	PresentationCache.ItemTitle = Scenario.ItemRequested;
+	PresentationCache.ItemTitle = ItemTitle;
 	PresentationCache.VisibleClues = ActiveEncounter.VisibleClues;
 
 	const int32 ResolvedCount = CurrentPhase == ESNEDayPhase::MorningShift ? MorningResolvedCount : EveningResolvedCount;
@@ -1132,13 +1148,14 @@ void USNEDialogueGameSubsystem::BuildShiftEncounterPresentation()
 		InvestigateHint = LOCTEXT("InvestigateHintDone", "You have investigated. Use the clues and decide.");
 	}
 
+	const FText OpeningDialogue = VisitPtr != nullptr ? VisitPtr->OpeningDialogue : FText::GetEmpty();
 	PresentationCache.BodyText = FText::Format(
 		LOCTEXT("ShiftBodyFmt", "Customer {0}/{1}: {2}\nItem Requested: {3}\n\n{4}\n\n{5}"),
 		FText::AsNumber(DisplayIndex),
 		FText::AsNumber(TargetCount),
 		Scenario.Nickname,
-		Scenario.ItemRequested,
-		Scenario.OpeningDialogue,
+		ItemTitle,
+		OpeningDialogue,
 		InvestigateHint);
 
 	FSNEChoiceData Choice;
@@ -1218,11 +1235,30 @@ void USNEDialogueGameSubsystem::StartNextEncounterIfNeeded()
 		return;
 	}
 
+	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ScenarioIndex];
+	const FSNECustomerHistory& History = CustomerHistories.FindOrAdd(Scenario.Id);
+	const int32 VisitIndex = PickEligibleVisitIndex(Scenario, History);
+
+	if (VisitIndex == INDEX_NONE || !Scenario.Visits.IsValidIndex(VisitIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: No eligible visit for scenario %s; skipping."), *Scenario.Id.ToString());
+		ResolvedCount = FMath::Min(ResolvedCount + 1, TargetCount);
+		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
+		return;
+	}
+
+	const FSNECustomerVisit& Visit = Scenario.Visits[VisitIndex];
+
 	ActiveEncounter = FSNEActiveEncounter{};
 	ActiveEncounter.ScenarioIndex = ScenarioIndex;
-	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ScenarioIndex];
+	ActiveEncounter.VisitIndex = VisitIndex;
+	ActiveEncounter.VisitCountAtSelection = History.VisitCount;
+	ActiveEncounter.SelectedItemPoolIndex = Visit.RequestedItemPool.Num() > 0
+		? RandomStream.RandRange(0, Visit.RequestedItemPool.Num() - 1)
+		: INDEX_NONE;
 	const float GoodIntentChance = SNESubsystemInternal::ComputeGoodIntentChance(
-		Scenario,
+		Visit.GoodIntentChance,
 		RuntimeContentAsset->Defaults,
 		Sanity,
 		Morality,
@@ -1254,12 +1290,25 @@ void USNEDialogueGameSubsystem::FinalizeCurrentEncounter(const bool bSold)
 	}
 
 	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ActiveEncounter.ScenarioIndex];
-	const FSNEOutcomeData& Outcome = SelectOutcome(Scenario, bSold, ActiveEncounter.Intent);
+	if (!Scenario.Visits.IsValidIndex(ActiveEncounter.VisitIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: FinalizeCurrentEncounter aborted due to invalid visit index %d on scenario %s."), ActiveEncounter.VisitIndex, *Scenario.Id.ToString());
+		LastEventText = LOCTEXT("FinalizeInvalidVisit", "Visit data was missing. Continuing shift.");
+		ActiveEncounter = FSNEActiveEncounter{};
+		ActiveEncounter.bResolved = true;
+		int32& ResolvedCount = CurrentPhase == ESNEDayPhase::MorningShift ? MorningResolvedCount : EveningResolvedCount;
+		const int32 TargetCount = GetRequiredEncountersForCurrentShift();
+		ResolvedCount = FMath::Clamp(ResolvedCount + 1, 0, TargetCount);
+		return;
+	}
+	const FSNECustomerVisit& Visit = Scenario.Visits[ActiveEncounter.VisitIndex];
+	const FSNEOutcomeData& Outcome = SelectOutcome(Visit, bSold, ActiveEncounter.Intent);
+	const USNEItemDataAsset* ActiveItem = GetActiveEncounterItem();
 
 	int32 TipAmount = 0;
 	if (bSold)
 	{
-		const int32 SaleValue = GetSaleValue(Scenario);
+		const int32 SaleValue = GetSaleValue(ActiveItem);
 		Money += SaleValue;
 
 		const float EffectiveTipChance = FMath::Clamp(TipChance * Scenario.TipChanceMultiplier, 0.0f, 1.0f);
@@ -1284,6 +1333,7 @@ void USNEDialogueGameSubsystem::FinalizeCurrentEncounter(const bool bSold)
 	{
 		const FText DeferredNewsText = SNESubsystemInternal::BuildDeferredEthicsNewsText(
 			Scenario,
+			ResolveItemDisplayName(ActiveItem),
 			bSold,
 			ActiveEncounter.Intent,
 			DeferredEthicsDelta);
@@ -1319,6 +1369,17 @@ void USNEDialogueGameSubsystem::FinalizeCurrentEncounter(const bool bSold)
 	int32& ResolvedCount = CurrentPhase == ESNEDayPhase::MorningShift ? MorningResolvedCount : EveningResolvedCount;
 	++ResolvedCount;
 
+	// Update persistent customer history so later visits can gate on it.
+	FSNECustomerHistory& History = CustomerHistories.FindOrAdd(Scenario.Id);
+	History.VisitCount = ActiveEncounter.VisitCountAtSelection + 1;
+	History.LastVisitDay = DayNumber;
+	History.LastDecision = bSold ? ESNEPreviousDecision::Sold : ESNEPreviousDecision::NotSold;
+	History.LastIntent = ActiveEncounter.Intent;
+	if (!Visit.VisitId.IsNone() && !History.CompletedVisitIds.Contains(Visit.VisitId))
+	{
+		History.CompletedVisitIds.Add(Visit.VisitId);
+	}
+
 	if (TipAmount > 0)
 	{
 		LastEventText = FText::Format(
@@ -1347,18 +1408,115 @@ bool USNEDialogueGameSubsystem::AppendDelayedOutcome(const FSNEOutcomeData& Outc
 	return true;
 }
 
-const FSNEOutcomeData& USNEDialogueGameSubsystem::SelectOutcome(const FSNECustomerScenario& Scenario, const bool bSell, const ESNECustomerIntent Intent) const
+const FSNEOutcomeData& USNEDialogueGameSubsystem::SelectOutcome(const FSNECustomerVisit& Visit, const bool bSell, const ESNECustomerIntent Intent) const
 {
 	if (bSell)
 	{
 		return Intent == ESNECustomerIntent::Good
-			? Scenario.SellGoodIntentOutcome
-			: Scenario.SellBadIntentOutcome;
+			? Visit.SellGoodIntentOutcome
+			: Visit.SellBadIntentOutcome;
 	}
 
 	return Intent == ESNECustomerIntent::Good
-		? Scenario.NoSellGoodIntentOutcome
-		: Scenario.NoSellBadIntentOutcome;
+		? Visit.NoSellGoodIntentOutcome
+		: Visit.NoSellBadIntentOutcome;
+}
+
+bool USNEDialogueGameSubsystem::IsVisitEligible(const FSNECustomerVisit& Visit, const FSNECustomerScenario& Scenario, const FSNECustomerHistory& History) const
+{
+	const FSNEVisitConditions& C = Visit.Conditions;
+
+	if (History.VisitCount < C.MinVisitCount) return false;
+	if (C.MaxVisitCount >= 0 && History.VisitCount > C.MaxVisitCount) return false;
+	if (DayNumber < C.MinDayNumber) return false;
+	if (C.MaxDayNumber >= 0 && DayNumber > C.MaxDayNumber) return false;
+	if (Morality < C.MinMorality || Morality > C.MaxMorality) return false;
+	if (Sanity < C.MinSanity || Sanity > C.MaxSanity) return false;
+
+	for (const FName& RequiredId : C.RequiresPreviousVisitIds)
+	{
+		if (RequiredId.IsNone()) continue;
+		if (!History.CompletedVisitIds.Contains(RequiredId)) return false;
+	}
+
+	for (const FName& BlockedId : C.BlockedByPreviousVisitIds)
+	{
+		if (BlockedId.IsNone()) continue;
+		if (History.CompletedVisitIds.Contains(BlockedId)) return false;
+	}
+
+	switch (C.RequiredLastDecision)
+	{
+	case ESNEPreviousDecision::Any:
+		break;
+	case ESNEPreviousDecision::NeverMet:
+		if (History.LastDecision != ESNEPreviousDecision::NeverMet) return false;
+		break;
+	case ESNEPreviousDecision::Sold:
+		if (History.LastDecision != ESNEPreviousDecision::Sold) return false;
+		break;
+	case ESNEPreviousDecision::NotSold:
+		if (History.LastDecision != ESNEPreviousDecision::NotSold) return false;
+		break;
+	}
+
+	if (C.RequiredLastIntent == ESNEIntentFilter::Good && (History.LastDecision == ESNEPreviousDecision::NeverMet || History.LastIntent != ESNECustomerIntent::Good)) return false;
+	if (C.RequiredLastIntent == ESNEIntentFilter::Bad && (History.LastDecision == ESNEPreviousDecision::NeverMet || History.LastIntent != ESNECustomerIntent::Bad)) return false;
+
+	return true;
+}
+
+int32 USNEDialogueGameSubsystem::PickEligibleVisitIndex(const FSNECustomerScenario& Scenario, const FSNECustomerHistory& History) const
+{
+	int32 BestIndex = INDEX_NONE;
+	int32 BestPriority = MIN_int32;
+
+	for (int32 Index = 0; Index < Scenario.Visits.Num(); ++Index)
+	{
+		const FSNECustomerVisit& Visit = Scenario.Visits[Index];
+		if (!IsVisitEligible(Visit, Scenario, History)) continue;
+
+		if (BestIndex == INDEX_NONE || Visit.Priority > BestPriority)
+		{
+			BestIndex = Index;
+			BestPriority = Visit.Priority;
+		}
+	}
+
+	// Arc-end fallback: if no visit matched AND the customer has been seen, apply ArcEndBehavior.
+	if (BestIndex == INDEX_NONE && History.VisitCount > 0 && Scenario.Visits.Num() > 0)
+	{
+		if (Scenario.ArcEndBehavior == ESNEArcEndBehavior::LoopLast)
+		{
+			return Scenario.Visits.Num() - 1;
+		}
+	}
+
+	return BestIndex;
+}
+
+bool USNEDialogueGameSubsystem::IsCustomerEligibleToday(const FSNECustomerScenario& Scenario, const FSNECustomerHistory& History, const bool bAlreadyDrawnToday) const
+{
+	if (bAlreadyDrawnToday && !Scenario.bAllowMultipleVisitsPerDay) return false;
+
+	if (History.VisitCount > 0 && Scenario.Visits.Num() > 0)
+	{
+		const int32 Completed = History.CompletedVisitIds.Num();
+		const bool bArcExhausted = Completed >= Scenario.Visits.Num();
+		if (bArcExhausted)
+		{
+			switch (Scenario.ArcEndBehavior)
+			{
+			case ESNEArcEndBehavior::Remove:
+			case ESNEArcEndBehavior::Silent:
+				return false;
+			case ESNEArcEndBehavior::LoopLast:
+				return true;
+			}
+		}
+	}
+
+	return PickEligibleVisitIndex(Scenario, History) != INDEX_NONE;
 }
 
 int32 USNEDialogueGameSubsystem::GetRequiredEncountersForCurrentShift() const
@@ -1373,9 +1531,37 @@ int32 USNEDialogueGameSubsystem::GetRequiredEncountersForCurrentShift() const
 		: RuntimeContentAsset->Defaults.EveningCustomerCount;
 }
 
-int32 USNEDialogueGameSubsystem::GetSaleValue(const FSNECustomerScenario& Scenario) const
+const USNEItemDataAsset* USNEDialogueGameSubsystem::GetActiveEncounterItem() const
 {
-	return RuntimeContentAsset != nullptr ? RuntimeContentAsset->GetSaleValue(Scenario.PriceTier) : 0;
+	if (RuntimeContentAsset == nullptr || !RuntimeContentAsset->Customers.IsValidIndex(ActiveEncounter.ScenarioIndex))
+	{
+		return nullptr;
+	}
+	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ActiveEncounter.ScenarioIndex];
+	if (!Scenario.Visits.IsValidIndex(ActiveEncounter.VisitIndex))
+	{
+		return nullptr;
+	}
+	const FSNECustomerVisit& Visit = Scenario.Visits[ActiveEncounter.VisitIndex];
+	if (!Visit.RequestedItemPool.IsValidIndex(ActiveEncounter.SelectedItemPoolIndex))
+	{
+		return nullptr;
+	}
+	return Visit.RequestedItemPool[ActiveEncounter.SelectedItemPoolIndex].LoadSynchronous();
+}
+
+int32 USNEDialogueGameSubsystem::GetSaleValue(const USNEItemDataAsset* Item) const
+{
+	return Item != nullptr ? FMath::Max(0, Item->BaseSaleValue) : 0;
+}
+
+FText USNEDialogueGameSubsystem::ResolveItemDisplayName(const USNEItemDataAsset* Item)
+{
+	if (Item != nullptr && !Item->DisplayName.IsEmpty())
+	{
+		return Item->DisplayName;
+	}
+	return NSLOCTEXT("SNEDialogueSubsystem", "UnknownItemFallback", "Unspecified item");
 }
 
 void USNEDialogueGameSubsystem::BuildDailyCustomerOrder()
@@ -1388,28 +1574,56 @@ void USNEDialogueGameSubsystem::BuildDailyCustomerOrder()
 	}
 
 	const int32 NeededCount = RuntimeContentAsset->Defaults.MorningCustomerCount + RuntimeContentAsset->Defaults.EveningCustomerCount;
-	TArray<int32> SourceIndices;
+
+	// Start with customers whose arc + conditions let them appear at least once today.
+	TArray<int32> EligibleIndices;
+	TArray<int32> RepeaterIndices; // subset of eligible that allow multi-draws
 	for (int32 Index = 0; Index < RuntimeContentAsset->Customers.Num(); ++Index)
 	{
-		SourceIndices.Add(Index);
+		const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[Index];
+		const FSNECustomerHistory& History = CustomerHistories.FindOrAdd(Scenario.Id);
+		if (!IsCustomerEligibleToday(Scenario, History, /*bAlreadyDrawnToday*/ false)) continue;
+
+		EligibleIndices.Add(Index);
+		if (Scenario.bAllowMultipleVisitsPerDay)
+		{
+			RepeaterIndices.Add(Index);
+		}
 	}
 
-	for (int32 Index = 0; Index < SourceIndices.Num(); ++Index)
+	if (EligibleIndices.Num() == 0) return;
+
+	// Shuffle the unique-draw pool.
+	for (int32 Index = 0; Index < EligibleIndices.Num(); ++Index)
 	{
-		const int32 SwapIndex = RandomStream.RandRange(Index, SourceIndices.Num() - 1);
-		SourceIndices.Swap(Index, SwapIndex);
+		const int32 SwapIndex = RandomStream.RandRange(Index, EligibleIndices.Num() - 1);
+		EligibleIndices.Swap(Index, SwapIndex);
 	}
 
+	TSet<int32> DrawnThisDay;
 	for (int32 Pick = 0; Pick < NeededCount; ++Pick)
 	{
-		if (Pick < SourceIndices.Num())
+		int32 ChosenIndex = INDEX_NONE;
+
+		// First pass: unseen-today customers.
+		for (const int32 Candidate : EligibleIndices)
 		{
-			DailyCustomerOrder.Add(SourceIndices[Pick]);
+			if (!DrawnThisDay.Contains(Candidate))
+			{
+				ChosenIndex = Candidate;
+				break;
+			}
 		}
-		else
+
+		// If every eligible has already been drawn today, only customers flagged as repeaters can fill the rest.
+		if (ChosenIndex == INDEX_NONE)
 		{
-			DailyCustomerOrder.Add(SourceIndices[RandomStream.RandRange(0, SourceIndices.Num() - 1)]);
+			if (RepeaterIndices.Num() == 0) break;
+			ChosenIndex = RepeaterIndices[RandomStream.RandRange(0, RepeaterIndices.Num() - 1)];
 		}
+
+		DailyCustomerOrder.Add(ChosenIndex);
+		DrawnThisDay.Add(ChosenIndex);
 	}
 }
 
@@ -1489,6 +1703,353 @@ const FSNELunchOption* USNEDialogueGameSubsystem::FindLunchOption(const FName Op
 		}
 	}
 	return nullptr;
+}
+
+// ============================================================================
+// Debug helpers
+// ============================================================================
+
+void USNEDialogueGameSubsystem::DebugSetMeters(int32 InMoney, int32 InEnergy, int32 InSanity, int32 InMorality)
+{
+	EnsureContentLoaded();
+	const int32 MaxEnergyClamp = RuntimeContentAsset != nullptr ? RuntimeContentAsset->Defaults.MaxEnergy : 8;
+	Money = InMoney;
+	Energy = FMath::Clamp(InEnergy, 0, FMath::Max(1, MaxEnergyClamp));
+	Sanity = InSanity;
+	Morality = InMorality;
+	RebuildPresentation();
+	BroadcastPresentation();
+}
+
+bool USNEDialogueGameSubsystem::DebugForceEncounter(const FName CustomerId, const FName VisitId)
+{
+	EnsureContentLoaded();
+	if (RuntimeContentAsset == nullptr) return false;
+
+	int32 ScenarioIdx = INDEX_NONE;
+	for (int32 Idx = 0; Idx < RuntimeContentAsset->Customers.Num(); ++Idx)
+	{
+		if (RuntimeContentAsset->Customers[Idx].Id == CustomerId)
+		{
+			ScenarioIdx = Idx;
+			break;
+		}
+	}
+	if (ScenarioIdx == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: DebugForceEncounter could not find customer '%s'."), *CustomerId.ToString());
+		return false;
+	}
+
+	const FSNECustomerScenario& Scenario = RuntimeContentAsset->Customers[ScenarioIdx];
+	int32 VisitIdx = INDEX_NONE;
+	for (int32 Idx = 0; Idx < Scenario.Visits.Num(); ++Idx)
+	{
+		if (Scenario.Visits[Idx].VisitId == VisitId)
+		{
+			VisitIdx = Idx;
+			break;
+		}
+	}
+	if (VisitIdx == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: DebugForceEncounter could not find visit '%s' on customer '%s'."), *VisitId.ToString(), *CustomerId.ToString());
+		return false;
+	}
+
+	if (CurrentPhase != ESNEDayPhase::MorningShift && CurrentPhase != ESNEDayPhase::EveningShift)
+	{
+		CurrentPhase = ESNEDayPhase::MorningShift;
+	}
+
+	const FSNECustomerVisit& Visit = Scenario.Visits[VisitIdx];
+	const FSNECustomerHistory& History = CustomerHistories.FindOrAdd(Scenario.Id);
+
+	ActiveEncounter = FSNEActiveEncounter{};
+	ActiveEncounter.ScenarioIndex = ScenarioIdx;
+	ActiveEncounter.VisitIndex = VisitIdx;
+	ActiveEncounter.VisitCountAtSelection = History.VisitCount;
+	ActiveEncounter.SelectedItemPoolIndex = Visit.RequestedItemPool.Num() > 0
+		? RandomStream.RandRange(0, Visit.RequestedItemPool.Num() - 1)
+		: INDEX_NONE;
+	ActiveEncounter.Intent = RandomStream.FRand() < FMath::Clamp(Visit.GoodIntentChance, 0.05f, 0.95f) ? ESNECustomerIntent::Good : ESNECustomerIntent::Bad;
+	ActiveEncounter.bResolved = false;
+	ActiveEncounter.bInvestigated = false;
+
+	RebuildPresentation();
+	BroadcastPresentation();
+	return true;
+}
+
+void USNEDialogueGameSubsystem::DebugJumpToPhase(const ESNEDayPhase Phase)
+{
+	EnterPhase(Phase);
+}
+
+void USNEDialogueGameSubsystem::DebugClearCustomerHistories()
+{
+	CustomerHistories.Reset();
+}
+
+int32 USNEDialogueGameSubsystem::DebugGetCustomerVisitCount(const FName CustomerId) const
+{
+	if (const FSNECustomerHistory* H = CustomerHistories.Find(CustomerId))
+	{
+		return H->VisitCount;
+	}
+	return 0;
+}
+
+// ============================================================================
+// Save / Load (JSON)
+// ============================================================================
+
+namespace SNESaveInternal
+{
+	static FString GetSaveDir()
+	{
+		return FPaths::ProjectSavedDir() / TEXT("SNESaves");
+	}
+
+	static FString GetSaveFilePath(const FString& SlotName)
+	{
+		const FString SanitizedSlot = SlotName.IsEmpty() ? TEXT("autosave") : SlotName;
+		return GetSaveDir() / (SanitizedSlot + TEXT(".sav"));
+	}
+
+	static TSharedPtr<FJsonObject> DeltaToJson(const FSNEMeterDelta& D)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("Money"), D.Money);
+		Obj->SetNumberField(TEXT("Energy"), D.Energy);
+		Obj->SetNumberField(TEXT("Sanity"), D.Sanity);
+		Obj->SetNumberField(TEXT("Morality"), D.Morality);
+		Obj->SetNumberField(TEXT("TipChance"), D.TipChance);
+		return Obj;
+	}
+
+	static void JsonToDelta(const TSharedPtr<FJsonObject>& Obj, FSNEMeterDelta& OutDelta)
+	{
+		if (!Obj.IsValid()) return;
+		OutDelta.Money = Obj->GetIntegerField(TEXT("Money"));
+		OutDelta.Energy = Obj->GetIntegerField(TEXT("Energy"));
+		OutDelta.Sanity = Obj->GetIntegerField(TEXT("Sanity"));
+		OutDelta.Morality = Obj->GetIntegerField(TEXT("Morality"));
+		OutDelta.TipChance = static_cast<float>(Obj->GetNumberField(TEXT("TipChance")));
+	}
+}
+
+bool USNEDialogueGameSubsystem::SaveToSlot(const FString& SlotName)
+{
+	using namespace SNESaveInternal;
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetNumberField(TEXT("Version"), 1);
+	Root->SetNumberField(TEXT("DayNumber"), DayNumber);
+	Root->SetNumberField(TEXT("CurrentPhase"), static_cast<int32>(CurrentPhase));
+	Root->SetNumberField(TEXT("Money"), Money);
+	Root->SetNumberField(TEXT("Energy"), Energy);
+	Root->SetNumberField(TEXT("Sanity"), Sanity);
+	Root->SetNumberField(TEXT("Morality"), Morality);
+	Root->SetNumberField(TEXT("TipChance"), TipChance);
+	Root->SetBoolField(TEXT("StoreCleanForTomorrow"), bStoreCleanForTomorrow);
+	Root->SetNumberField(TEXT("MorningResolvedCount"), MorningResolvedCount);
+	Root->SetNumberField(TEXT("EveningResolvedCount"), EveningResolvedCount);
+	Root->SetNumberField(TEXT("CurrentEncounterOrderIndex"), CurrentEncounterOrderIndex);
+	Root->SetBoolField(TEXT("MorningPrepDone"), bMorningPrepDone);
+	Root->SetBoolField(TEXT("LunchDone"), bLunchDone);
+	Root->SetBoolField(TEXT("NightPrepDone"), bNightPrepDone);
+	Root->SetBoolField(TEXT("ClosingDone"), bClosingDone);
+	Root->SetBoolField(TEXT("RandomEventApplied"), bRandomEventApplied);
+	Root->SetBoolField(TEXT("HasStartedDay"), bHasStartedDay);
+	Root->SetStringField(TEXT("LastEventText"), LastEventText.ToString());
+
+	// DailyCustomerOrder
+	{
+		TArray<TSharedPtr<FJsonValue>> OrderArr;
+		for (int32 Idx : DailyCustomerOrder)
+		{
+			OrderArr.Add(MakeShared<FJsonValueNumber>(Idx));
+		}
+		Root->SetArrayField(TEXT("DailyCustomerOrder"), OrderArr);
+	}
+
+	// PendingDelayedOutcomes
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (const FSNEDelayedOutcomeEntry& Entry : PendingDelayedOutcomes)
+		{
+			TSharedPtr<FJsonObject> E = MakeShared<FJsonObject>();
+			E->SetStringField(TEXT("LaterText"), Entry.LaterText.ToString());
+			E->SetObjectField(TEXT("LaterDelta"), DeltaToJson(Entry.LaterDelta));
+			Arr.Add(MakeShared<FJsonValueObject>(E));
+		}
+		Root->SetArrayField(TEXT("PendingDelayedOutcomes"), Arr);
+	}
+
+	// CustomerHistories
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (const TPair<FName, FSNECustomerHistory>& Pair : CustomerHistories)
+		{
+			TSharedPtr<FJsonObject> H = MakeShared<FJsonObject>();
+			H->SetStringField(TEXT("CustomerId"), Pair.Key.ToString());
+			H->SetNumberField(TEXT("VisitCount"), Pair.Value.VisitCount);
+			H->SetNumberField(TEXT("LastVisitDay"), Pair.Value.LastVisitDay);
+			H->SetNumberField(TEXT("LastDecision"), static_cast<int32>(Pair.Value.LastDecision));
+			H->SetNumberField(TEXT("LastIntent"), static_cast<int32>(Pair.Value.LastIntent));
+			TArray<TSharedPtr<FJsonValue>> CompletedArr;
+			for (const FName& Id : Pair.Value.CompletedVisitIds)
+			{
+				CompletedArr.Add(MakeShared<FJsonValueString>(Id.ToString()));
+			}
+			H->SetArrayField(TEXT("CompletedVisitIds"), CompletedArr);
+			Arr.Add(MakeShared<FJsonValueObject>(H));
+		}
+		Root->SetArrayField(TEXT("CustomerHistories"), Arr);
+	}
+
+	FString Out;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+	if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: SaveToSlot failed to serialize."));
+		return false;
+	}
+
+	IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
+	const FString Dir = GetSaveDir();
+	if (!PF.DirectoryExists(*Dir))
+	{
+		PF.CreateDirectoryTree(*Dir);
+	}
+	const FString Path = GetSaveFilePath(SlotName);
+	if (!FFileHelper::SaveStringToFile(Out, *Path))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: SaveToSlot failed to write '%s'."), *Path);
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("SNE: Saved game to '%s'."), *Path);
+	return true;
+}
+
+bool USNEDialogueGameSubsystem::LoadFromSlot(const FString& SlotName)
+{
+	using namespace SNESaveInternal;
+	EnsureContentLoaded();
+
+	const FString Path = GetSaveFilePath(SlotName);
+	FString Raw;
+	if (!FFileHelper::LoadFileToString(Raw, *Path))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: LoadFromSlot could not read '%s'."), *Path);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> Root;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Raw);
+	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SNE: LoadFromSlot could not parse '%s'."), *Path);
+		return false;
+	}
+
+	DayNumber = Root->GetIntegerField(TEXT("DayNumber"));
+	CurrentPhase = static_cast<ESNEDayPhase>(Root->GetIntegerField(TEXT("CurrentPhase")));
+	Money = Root->GetIntegerField(TEXT("Money"));
+	Energy = Root->GetIntegerField(TEXT("Energy"));
+	Sanity = Root->GetIntegerField(TEXT("Sanity"));
+	Morality = Root->GetIntegerField(TEXT("Morality"));
+	TipChance = static_cast<float>(Root->GetNumberField(TEXT("TipChance")));
+	bStoreCleanForTomorrow = Root->GetBoolField(TEXT("StoreCleanForTomorrow"));
+	MorningResolvedCount = Root->GetIntegerField(TEXT("MorningResolvedCount"));
+	EveningResolvedCount = Root->GetIntegerField(TEXT("EveningResolvedCount"));
+	CurrentEncounterOrderIndex = Root->GetIntegerField(TEXT("CurrentEncounterOrderIndex"));
+	bMorningPrepDone = Root->GetBoolField(TEXT("MorningPrepDone"));
+	bLunchDone = Root->GetBoolField(TEXT("LunchDone"));
+	bNightPrepDone = Root->GetBoolField(TEXT("NightPrepDone"));
+	bClosingDone = Root->GetBoolField(TEXT("ClosingDone"));
+	bRandomEventApplied = Root->GetBoolField(TEXT("RandomEventApplied"));
+	bHasStartedDay = Root->GetBoolField(TEXT("HasStartedDay"));
+	LastEventText = FText::FromString(Root->GetStringField(TEXT("LastEventText")));
+
+	DailyCustomerOrder.Reset();
+	const TArray<TSharedPtr<FJsonValue>>* OrderArr = nullptr;
+	if (Root->TryGetArrayField(TEXT("DailyCustomerOrder"), OrderArr))
+	{
+		for (const TSharedPtr<FJsonValue>& V : *OrderArr)
+		{
+			DailyCustomerOrder.Add(static_cast<int32>(V->AsNumber()));
+		}
+	}
+
+	PendingDelayedOutcomes.Reset();
+	const TArray<TSharedPtr<FJsonValue>>* PendArr = nullptr;
+	if (Root->TryGetArrayField(TEXT("PendingDelayedOutcomes"), PendArr))
+	{
+		for (const TSharedPtr<FJsonValue>& V : *PendArr)
+		{
+			const TSharedPtr<FJsonObject>& O = V->AsObject();
+			FSNEDelayedOutcomeEntry Entry;
+			Entry.LaterText = FText::FromString(O->GetStringField(TEXT("LaterText")));
+			JsonToDelta(O->GetObjectField(TEXT("LaterDelta")), Entry.LaterDelta);
+			PendingDelayedOutcomes.Add(Entry);
+		}
+	}
+
+	CustomerHistories.Reset();
+	const TArray<TSharedPtr<FJsonValue>>* HistArr = nullptr;
+	if (Root->TryGetArrayField(TEXT("CustomerHistories"), HistArr))
+	{
+		for (const TSharedPtr<FJsonValue>& V : *HistArr)
+		{
+			const TSharedPtr<FJsonObject>& O = V->AsObject();
+			FSNECustomerHistory H;
+			H.VisitCount = O->GetIntegerField(TEXT("VisitCount"));
+			H.LastVisitDay = O->GetIntegerField(TEXT("LastVisitDay"));
+			H.LastDecision = static_cast<ESNEPreviousDecision>(O->GetIntegerField(TEXT("LastDecision")));
+			H.LastIntent = static_cast<ESNECustomerIntent>(O->GetIntegerField(TEXT("LastIntent")));
+			const TArray<TSharedPtr<FJsonValue>>* CompletedArr = nullptr;
+			if (O->TryGetArrayField(TEXT("CompletedVisitIds"), CompletedArr))
+			{
+				for (const TSharedPtr<FJsonValue>& C : *CompletedArr)
+				{
+					H.CompletedVisitIds.Add(FName(*C->AsString()));
+				}
+			}
+			const FName CustomerId(*O->GetStringField(TEXT("CustomerId")));
+			CustomerHistories.Add(CustomerId, H);
+		}
+	}
+
+	// Active encounter is not saved; loading back to MorningShift/EveningShift mid-encounter
+	// would need visit re-selection, so we reset it and let the next StartNextEncounterIfNeeded run.
+	ActiveEncounter = FSNEActiveEncounter{};
+	ActiveEncounter.bResolved = true;
+
+	RebuildPresentation();
+	BroadcastPresentation();
+	UE_LOG(LogTemp, Log, TEXT("SNE: Loaded game from '%s'."), *Path);
+	return true;
+}
+
+bool USNEDialogueGameSubsystem::DoesSaveSlotExist(const FString& SlotName) const
+{
+	using namespace SNESaveInternal;
+	return FPlatformFileManager::Get().GetPlatformFile().FileExists(*GetSaveFilePath(SlotName));
+}
+
+bool USNEDialogueGameSubsystem::DeleteSaveSlot(const FString& SlotName)
+{
+	using namespace SNESaveInternal;
+	IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
+	const FString Path = GetSaveFilePath(SlotName);
+	if (!PF.FileExists(*Path))
+	{
+		return false;
+	}
+	return PF.DeleteFile(*Path);
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -161,6 +161,46 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SNE|Debug")
 	void DebugApplyMorningNewsNow();
 
+	// --- Designer-facing debug helpers (safe to call in PIE) ---
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Debug",
+		meta = (ToolTip = "Set player meters directly. Useful for testing visit gating conditions."))
+	void DebugSetMeters(int32 InMoney, int32 InEnergy, int32 InSanity, int32 InMorality);
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Debug",
+		meta = (ToolTip = "Jump directly to a specific customer+visit. Force-enters the current shift phase if needed. Returns false if the customer/visit can't be found."))
+	bool DebugForceEncounter(FName CustomerId, FName VisitId);
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Debug",
+		meta = (ToolTip = "Jump to a named phase immediately. Does not run intermediate logic."))
+	void DebugJumpToPhase(ESNEDayPhase Phase);
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Debug",
+		meta = (ToolTip = "Wipe all recurring-character memory (VisitCount / LastDecision / CompletedVisitIds)."))
+	void DebugClearCustomerHistories();
+
+	UFUNCTION(BlueprintPure, Category = "SNE|Debug",
+		meta = (ToolTip = "How many times the player has encountered this customer across the current run."))
+	int32 DebugGetCustomerVisitCount(FName CustomerId) const;
+
+	// --- Save / Load ---
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Save",
+		meta = (ToolTip = "Serialize full game state (meters, day, phase, customer histories, delayed outcomes) to a JSON file. SlotName is used as the filename; default 'autosave' writes to Saved/SNESaves/autosave.sav."))
+	bool SaveToSlot(const FString& SlotName);
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Save",
+		meta = (ToolTip = "Load game state from a slot. Returns false and leaves current state untouched if the slot is missing or corrupt."))
+	bool LoadFromSlot(const FString& SlotName);
+
+	UFUNCTION(BlueprintPure, Category = "SNE|Save",
+		meta = (ToolTip = "True if a save file exists at the given slot."))
+	bool DoesSaveSlotExist(const FString& SlotName) const;
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Save",
+		meta = (ToolTip = "Delete a save slot. Returns true if the file was deleted."))
+	bool DeleteSaveSlot(const FString& SlotName);
+
 	UFUNCTION(BlueprintPure, Category = "SNE|Data")
 	const USNEPrototypeContentAsset* GetResolvedContent() const;
 
@@ -182,10 +222,22 @@ private:
 	struct FSNEActiveEncounter
 	{
 		int32 ScenarioIndex = INDEX_NONE;
+		int32 VisitIndex = INDEX_NONE;
+		int32 VisitCountAtSelection = 0;
+		int32 SelectedItemPoolIndex = INDEX_NONE;
 		ESNECustomerIntent Intent = ESNECustomerIntent::Good;
 		bool bInvestigated = false;
 		bool bResolved = false;
 		TArray<FText> VisibleClues;
+	};
+
+	struct FSNECustomerHistory
+	{
+		int32 VisitCount = 0;
+		int32 LastVisitDay = -1;
+		ESNEPreviousDecision LastDecision = ESNEPreviousDecision::NeverMet;
+		ESNECustomerIntent LastIntent = ESNECustomerIntent::Good;
+		TArray<FName> CompletedVisitIds;
 	};
 
 	void EnsureContentLoaded();
@@ -197,9 +249,16 @@ private:
 	void StartNextEncounterIfNeeded();
 	void FinalizeCurrentEncounter(bool bSold);
 	bool AppendDelayedOutcome(const FSNEOutcomeData& Outcome);
-	const FSNEOutcomeData& SelectOutcome(const FSNECustomerScenario& Scenario, bool bSell, ESNECustomerIntent Intent) const;
+	const FSNEOutcomeData& SelectOutcome(const FSNECustomerVisit& Visit, bool bSell, ESNECustomerIntent Intent) const;
+	int32 PickEligibleVisitIndex(const FSNECustomerScenario& Scenario, const FSNECustomerHistory& History) const;
+	bool IsVisitEligible(const FSNECustomerVisit& Visit, const FSNECustomerScenario& Scenario, const FSNECustomerHistory& History) const;
+	bool IsCustomerEligibleToday(const FSNECustomerScenario& Scenario, const FSNECustomerHistory& History, bool bAlreadyDrawnToday) const;
 	int32 GetRequiredEncountersForCurrentShift() const;
-	int32 GetSaleValue(const FSNECustomerScenario& Scenario) const;
+	// Returns the visit's currently-selected item for the active encounter, or nullptr if none.
+	// Uses FSNEActiveEncounter::SelectedItemPoolIndex when the visit has a pool.
+	const USNEItemDataAsset* GetActiveEncounterItem() const;
+	int32 GetSaleValue(const USNEItemDataAsset* Item) const;
+	static FText ResolveItemDisplayName(const USNEItemDataAsset* Item);
 	void BuildDailyCustomerOrder();
 	void BroadcastPresentation();
 	FString MakeMeterSummary() const;
@@ -222,6 +281,9 @@ private:
 
 	UPROPERTY(Transient)
 	TArray<int32> DailyCustomerOrder;
+
+	// Persistent across days for the duration of a play session. Keyed on FSNECustomerScenario::Id.
+	TMap<FName, FSNECustomerHistory> CustomerHistories;
 
 	FSNEActiveEncounter ActiveEncounter;
 

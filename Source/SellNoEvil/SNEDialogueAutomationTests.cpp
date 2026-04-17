@@ -257,14 +257,21 @@ bool FSNEContentIntegrityTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Authored content should include at least five customers"), Content->Customers.Num() >= 5);
 	for (const FSNECustomerScenario& Customer : Content->Customers)
 	{
-		TestTrue(FString::Printf(TEXT("%s neutral clues should not be empty"), *Customer.Id.ToString()), Customer.NeutralClues.Num() > 0);
-		TestTrue(FString::Printf(TEXT("%s good clues should not be empty"), *Customer.Id.ToString()), Customer.GoodLeaningClues.Num() > 0);
-		TestTrue(FString::Printf(TEXT("%s bad clues should not be empty"), *Customer.Id.ToString()), Customer.BadLeaningClues.Num() > 0);
-		TestTrue(FString::Printf(TEXT("%s good intent chance should be in [0,1]"), *Customer.Id.ToString()), Customer.GoodIntentChance >= 0.0f && Customer.GoodIntentChance <= 1.0f);
-		TestFalse(FString::Printf(TEXT("%s sell good immediate text should not be empty"), *Customer.Id.ToString()), Customer.SellGoodIntentOutcome.ImmediateText.IsEmpty());
-		TestFalse(FString::Printf(TEXT("%s sell bad immediate text should not be empty"), *Customer.Id.ToString()), Customer.SellBadIntentOutcome.ImmediateText.IsEmpty());
-		TestFalse(FString::Printf(TEXT("%s no-sell good immediate text should not be empty"), *Customer.Id.ToString()), Customer.NoSellGoodIntentOutcome.ImmediateText.IsEmpty());
-		TestFalse(FString::Printf(TEXT("%s no-sell bad immediate text should not be empty"), *Customer.Id.ToString()), Customer.NoSellBadIntentOutcome.ImmediateText.IsEmpty());
+		const FString CustomerIdStr = Customer.Id.ToString();
+		TestTrue(FString::Printf(TEXT("%s should have at least one visit"), *CustomerIdStr), Customer.Visits.Num() > 0);
+		for (int32 VisitIdx = 0; VisitIdx < Customer.Visits.Num(); ++VisitIdx)
+		{
+			const FSNECustomerVisit& Visit = Customer.Visits[VisitIdx];
+			const FString VisitLabel = FString::Printf(TEXT("%s visit %d"), *CustomerIdStr, VisitIdx);
+			TestTrue(FString::Printf(TEXT("%s neutral clues should not be empty"), *VisitLabel), Visit.NeutralClues.Num() > 0);
+			TestTrue(FString::Printf(TEXT("%s good clues should not be empty"), *VisitLabel), Visit.GoodLeaningClues.Num() > 0);
+			TestTrue(FString::Printf(TEXT("%s bad clues should not be empty"), *VisitLabel), Visit.BadLeaningClues.Num() > 0);
+			TestTrue(FString::Printf(TEXT("%s good intent chance should be in [0,1]"), *VisitLabel), Visit.GoodIntentChance >= 0.0f && Visit.GoodIntentChance <= 1.0f);
+			TestFalse(FString::Printf(TEXT("%s sell good immediate text should not be empty"), *VisitLabel), Visit.SellGoodIntentOutcome.ImmediateText.IsEmpty());
+			TestFalse(FString::Printf(TEXT("%s sell bad immediate text should not be empty"), *VisitLabel), Visit.SellBadIntentOutcome.ImmediateText.IsEmpty());
+			TestFalse(FString::Printf(TEXT("%s no-sell good immediate text should not be empty"), *VisitLabel), Visit.NoSellGoodIntentOutcome.ImmediateText.IsEmpty());
+			TestFalse(FString::Printf(TEXT("%s no-sell bad immediate text should not be empty"), *VisitLabel), Visit.NoSellBadIntentOutcome.ImmediateText.IsEmpty());
+		}
 	}
 
 	return true;
