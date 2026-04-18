@@ -23,7 +23,15 @@ void ASNEPrototypePlayerController::BeginPlay()
 			const AGameModeBase* ActiveGameMode = GetWorld() != nullptr ? GetWorld()->GetAuthGameMode() : nullptr;
 			if (const ASNEPrototypeGameMode* SNEGameMode = Cast<ASNEPrototypeGameMode>(ActiveGameMode))
 			{
-				DialogueSubsystem->SetRootWidgetClass(SNEGameMode->RootWidgetClass);
+				UClass* RawRootWidgetClass = SNEGameMode->RootWidgetClass.LoadSynchronous();
+				if (RawRootWidgetClass != nullptr && RawRootWidgetClass->IsChildOf(UUserWidget::StaticClass()))
+				{
+					DialogueSubsystem->SetRootWidgetClass(RawRootWidgetClass);
+				}
+				else if (RawRootWidgetClass != nullptr)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("SNE: RootWidgetClass '%s' is not a UUserWidget. Ignoring GameMode override."), *GetNameSafe(RawRootWidgetClass));
+				}
 			}
 			else
 			{

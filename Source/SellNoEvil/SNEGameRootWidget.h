@@ -32,7 +32,7 @@ protected:
 	// Designer-authored class used to spawn each choice button inside ChoiceListBox.
 	// Must derive from USNEIndexedButton. Set this on the WBP in the editor.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "SNE|UI")
-	TSubclassOf<USNEIndexedButton> ChoiceButtonClass;
+	TSoftClassPtr<USNEIndexedButton> ChoiceButtonClass;
 
 	// Optional BlueprintImplementableEvent hook for designers who want to react to
 	// presentation changes in Blueprint (e.g., play animations) in addition to the

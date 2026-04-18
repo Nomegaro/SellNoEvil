@@ -10,6 +10,7 @@
 #include "Misc/DataValidation.h"
 #include "Misc/PackageName.h"
 #include "SNEItemDataAsset.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 #endif
@@ -345,10 +346,22 @@ namespace SNESampleContentInternal
 		const FString PackagePath = FString::Printf(TEXT("%s/%s"), ItemsPackageRoot, *AssetName);
 		const FString ObjectPath = PackagePath + TEXT(".") + AssetName;
 
-		// Fast path: already exists.
-		if (USNEItemDataAsset* Existing = LoadObject<USNEItemDataAsset>(nullptr, *ObjectPath))
+		// Fast path: already exists and has the expected type.
+		UObject* ExistingObject = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
+		if (USNEItemDataAsset* Existing = Cast<USNEItemDataAsset>(ExistingObject))
 		{
 			return Existing;
+		}
+		if (ExistingObject != nullptr)
+		{
+			UE_LOG(
+				LogTemp,
+				Error,
+				TEXT("SNE: Existing object '%s' is '%s', expected '%s'."),
+				*ObjectPath,
+				*GetNameSafe(ExistingObject->GetClass()),
+				*USNEItemDataAsset::StaticClass()->GetName());
+			return nullptr;
 		}
 
 		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
