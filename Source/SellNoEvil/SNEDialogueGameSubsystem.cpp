@@ -329,6 +329,7 @@ bool USNEDialogueGameSubsystem::TryInvestigate()
 	}
 
 	ActiveEncounter.VisibleClues.Reset();
+	ActiveEncounter.SkillAttributedClues.Reset();
 	if (Pool.Num() == 0)
 	{
 		ActiveEncounter.bInvestigated = true;
@@ -337,6 +338,22 @@ bool USNEDialogueGameSubsystem::TryInvestigate()
 		BroadcastPresentation();
 		return true;
 	}
+
+	// Skill attribution: which voice "finds" each clue.
+	// Neutral observations -> Sanity (something feels off).
+	// Good-leaning sympathy -> Morality (you owe them due diligence).
+	// Bad-leaning red flags  -> Money (your merchant instincts catch the angle).
+	const int32 NumNeutral = Visit.NeutralClues.Num();
+	const int32 NumGood    = Visit.GoodLeaningClues.Num();
+	auto SkillForPoolIndex = [&](int32 PoolIdx) -> ESNESkill
+	{
+		if (PoolIdx < NumNeutral) return ESNESkill::Sanity;
+		if (ActiveEncounter.Intent == ESNECustomerIntent::Good)
+		{
+			return ESNESkill::Morality;
+		}
+		return ESNESkill::Money;
+	};
 
 	const int32 DesiredCount = FMath::Clamp(RandomStream.RandRange(2, 3), 1, Pool.Num());
 	TArray<int32> Indices;
@@ -351,6 +368,11 @@ bool USNEDialogueGameSubsystem::TryInvestigate()
 		const int32 PoolIndex = Indices[Roll];
 		Indices.RemoveAtSwap(Roll, 1, EAllowShrinking::No);
 		ActiveEncounter.VisibleClues.Add(Pool[PoolIndex]);
+
+		FSNESkillLine Attributed;
+		Attributed.Skill = SkillForPoolIndex(PoolIndex);
+		Attributed.Line = Pool[PoolIndex];
+		ActiveEncounter.SkillAttributedClues.Add(Attributed);
 	}
 
 	ActiveEncounter.bInvestigated = true;
@@ -870,6 +892,10 @@ void USNEDialogueGameSubsystem::StartNextDay()
 	Energy = FMath::Clamp(Defaults.StartingEnergy, 0, Defaults.MaxEnergy);
 	TipChance = Defaults.BaseTipChance;
 
+	// Thought Cabinet: tick maturation, then apply daily internalizing penalties.
+	TickThoughts();
+	ApplyDailyThoughtPenalties();
+
 	MorningResolvedCount = 0;
 	EveningResolvedCount = 0;
 	CurrentEncounterOrderIndex = 0;
@@ -1072,6 +1098,300 @@ void USNEDialogueGameSubsystem::RebuildPresentation()
 		PresentationCache.Choices.Add(Choice);
 		break;
 	}
+
+	ApplySkillGatesToChoices();
+	AppendSkillCommentary();
+}
+
+int32 USNEDialogueGameSubsystem::GetSkillModifier(ESNESkill Skill) const
+{
+	// Map raw meter values into a tabletop-style modifier band.
+	// Money is far higher-magnitude than the others, so it gets its own scale.
+	int32 Raw = 0;
+	switch (Skill)
+	{
+	case ESNESkill::Money:    Raw = Money / 50; break;
+	case ESNESkill::Energy:   Raw = Energy / 2;  break;
+	case ESNESkill::Sanity:   Raw = Sanity;      break;
+	case ESNESkill::Morality: Raw = Morality;    break;
+	}
+
+	// Add matured Thought Cabinet bonuses for this skill.
+	int32 ThoughtBonus = 0;
+	for (const FSNEActiveThought& Active : ActiveThoughts)
+	{
+		if (!Active.bMatured) continue;
+		const USNEThoughtDataAsset* Asset = Active.Thought.LoadSynchronous();
+		if (Asset != nullptr && Asset->ApplicableSkill == Skill)
+		{
+			ThoughtBonus += Asset->MaturedModifier;
+		}
+	}
+
+	return FMath::Clamp(Raw + ThoughtBonus, -3, 6);
+}
+
+void USNEDialogueGameSubsystem::ApplySkillGatesToChoices()
+{
+	// DE-style: locked options are still visible (greyed out) and labeled with
+	// the required skill threshold so the player sees the depth they're missing.
+	const UEnum* SkillEnum = StaticEnum<ESNESkill>();
+	for (FSNEChoiceData& Choice : PresentationCache.Choices)
+	{
+		if (!Choice.bHasSkillRequirement) continue;
+
+		int32 CurrentValue = 0;
+		switch (Choice.RequiredSkill)
+		{
+		case ESNESkill::Money:    CurrentValue = Money;    break;
+		case ESNESkill::Energy:   CurrentValue = Energy;   break;
+		case ESNESkill::Sanity:   CurrentValue = Sanity;   break;
+		case ESNESkill::Morality: CurrentValue = Morality; break;
+		}
+
+		const bool bSkillPasses = CurrentValue >= Choice.RequiredValue;
+		if (!bSkillPasses)
+		{
+			Choice.bEnabled = false;
+		}
+
+		const FText SkillName = SkillEnum != nullptr
+			? SkillEnum->GetDisplayNameTextByValue(static_cast<int64>(Choice.RequiredSkill))
+			: FText::FromString(TEXT("SKILL"));
+		Choice.Label = FText::Format(
+			NSLOCTEXT("SNE", "SkillGatedChoiceFmt", "[{0} {1}] {2}"),
+			SkillName,
+			FText::AsNumber(Choice.RequiredValue),
+			Choice.Label);
+	}
+}
+
+int32 USNEDialogueGameSubsystem::GetThoughtSlots() const
+{
+	return FMath::Clamp(1 + (Sanity / 3), 1, 5);
+}
+
+TArray<FSNEActiveThought> USNEDialogueGameSubsystem::GetActiveThoughts() const
+{
+	return ActiveThoughts;
+}
+
+bool USNEDialogueGameSubsystem::InternalizeThought(USNEThoughtDataAsset* Thought)
+{
+	if (Thought == nullptr) return false;
+	if (ActiveThoughts.Num() >= GetThoughtSlots()) return false;
+
+	const FSoftObjectPath InPath(Thought);
+	for (const FSNEActiveThought& Active : ActiveThoughts)
+	{
+		if (Active.Thought.ToSoftObjectPath() == InPath) return false;
+	}
+
+	FSNEActiveThought Entry;
+	Entry.Thought = Thought;
+	Entry.DaysRemaining = FMath::Max(1, Thought->DaysToInternalize);
+	Entry.bMatured = false;
+	ActiveThoughts.Add(Entry);
+
+	OnThoughtsChanged.Broadcast();
+	return true;
+}
+
+bool USNEDialogueGameSubsystem::ForgetThought(USNEThoughtDataAsset* Thought)
+{
+	if (Thought == nullptr) return false;
+	const FSoftObjectPath Target(Thought);
+	const int32 Removed = ActiveThoughts.RemoveAll(
+		[&Target](const FSNEActiveThought& A){ return A.Thought.ToSoftObjectPath() == Target; });
+	if (Removed > 0)
+	{
+		OnThoughtsChanged.Broadcast();
+		return true;
+	}
+	return false;
+}
+
+void USNEDialogueGameSubsystem::TickThoughts()
+{
+	bool bChanged = false;
+	for (FSNEActiveThought& Active : ActiveThoughts)
+	{
+		if (Active.bMatured) continue;
+		Active.DaysRemaining = FMath::Max(0, Active.DaysRemaining - 1);
+		if (Active.DaysRemaining <= 0)
+		{
+			Active.bMatured = true;
+			bChanged = true;
+		}
+	}
+	if (bChanged)
+	{
+		OnThoughtsChanged.Broadcast();
+	}
+}
+
+void USNEDialogueGameSubsystem::ApplyDailyThoughtPenalties()
+{
+	for (const FSNEActiveThought& Active : ActiveThoughts)
+	{
+		if (Active.bMatured) continue;
+		const USNEThoughtDataAsset* Asset = Active.Thought.LoadSynchronous();
+		if (Asset == nullptr) continue;
+		ApplyMeterDelta(Asset->DailyInternalizingPenalty);
+	}
+}
+
+FSNESkillCheckResult USNEDialogueGameSubsystem::RollSkillCheck(const FSNESkillCheck& Check)
+{
+	FSNESkillCheckResult Result;
+	Result.Skill = Check.Skill;
+	Result.DifficultyClass = Check.DifficultyClass;
+	Result.ContextLabel = Check.ContextLabel;
+
+	// 2d6 — use the seeded RandomStream so SetRandomSeedForTesting still works.
+	const int32 D1 = RandomStream.RandRange(1, 6);
+	const int32 D2 = RandomStream.RandRange(1, 6);
+	Result.DiceRoll = D1 + D2;
+	Result.SkillModifier = GetSkillModifier(Check.Skill);
+	Result.Total = Result.DiceRoll + Result.SkillModifier;
+	Result.Margin = Result.Total - Result.DifficultyClass;
+
+	// Snake-eyes always fail, boxcars always pass (DE-style critical bands).
+	if (Result.DiceRoll == 2)
+	{
+		Result.bPassed = false;
+	}
+	else if (Result.DiceRoll == 12)
+	{
+		Result.bPassed = true;
+	}
+	else
+	{
+		Result.bPassed = (Result.Total >= Result.DifficultyClass);
+	}
+
+	LastCheckResult = Result;
+	bHasLastCheckResult = true;
+	return Result;
+}
+
+void USNEDialogueGameSubsystem::AppendSkillCommentary()
+{
+	// Disco-Elysium-style internal voices: each meter whispers a contextual line
+	// when its value crosses thresholds. Lines are filtered to current phase so
+	// the Morning News doesn't get encounter-only commentary.
+	PresentationCache.SkillCommentary.Reset();
+
+	const bool bInEncounter = (CurrentPhase == ESNEDayPhase::MorningShift
+		|| CurrentPhase == ESNEDayPhase::EveningShift)
+		&& !ActiveEncounter.bResolved
+		&& ActiveEncounter.ScenarioIndex != INDEX_NONE;
+
+	auto Push = [this](ESNESkill Skill, const FText& Line)
+	{
+		FSNESkillLine Entry;
+		Entry.Skill = Skill;
+		Entry.Line = Line;
+		PresentationCache.SkillCommentary.Add(Entry);
+	};
+
+	// Surface the most recent skill check exactly once.
+	if (bHasLastCheckResult)
+	{
+		FText CheckLine;
+		if (!LastCheckResult.ContextLabel.IsEmpty())
+		{
+			CheckLine = FText::Format(
+				LOCTEXT("VoiceCheckLabeledFmt",
+					"{0}: {1} (rolled {2} + {3} = {4} vs DC {5})."),
+				LastCheckResult.ContextLabel,
+				LastCheckResult.bPassed ? LOCTEXT("CheckPass", "PASS") : LOCTEXT("CheckFail", "FAIL"),
+				FText::AsNumber(LastCheckResult.DiceRoll),
+				FText::AsNumber(LastCheckResult.SkillModifier),
+				FText::AsNumber(LastCheckResult.Total),
+				FText::AsNumber(LastCheckResult.DifficultyClass));
+		}
+		else
+		{
+			CheckLine = FText::Format(
+				LOCTEXT("VoiceCheckUnlabeledFmt",
+					"{0} — rolled {1} + {2} = {3} vs DC {4}."),
+				LastCheckResult.bPassed ? LOCTEXT("CheckPass", "PASS") : LOCTEXT("CheckFail", "FAIL"),
+				FText::AsNumber(LastCheckResult.DiceRoll),
+				FText::AsNumber(LastCheckResult.SkillModifier),
+				FText::AsNumber(LastCheckResult.Total),
+				FText::AsNumber(LastCheckResult.DifficultyClass));
+		}
+		Push(LastCheckResult.Skill, CheckLine);
+		bHasLastCheckResult = false;
+	}
+
+	// MONEY voice — the merchant's appetite
+	if (bInEncounter)
+	{
+		if (Money <= 0)
+		{
+			Push(ESNESkill::Money, LOCTEXT("VoiceMoneyBroke",
+				"The till is empty. Every coin matters now. Sell. SELL."));
+		}
+		else if (Money >= 200)
+		{
+			Push(ESNESkill::Money, LOCTEXT("VoiceMoneyFat",
+				"You can afford a little principle today. A little."));
+		}
+	}
+
+	// ENERGY voice — the body keeping score
+	if (Energy <= 2)
+	{
+		Push(ESNESkill::Energy, LOCTEXT("VoiceEnergyLow",
+			"Your hands are heavy. Investigation is a luxury you can no longer afford."));
+	}
+
+	// SANITY voice — the part of you that notices wrong things
+	if (bInEncounter)
+	{
+		if (Sanity <= 0)
+		{
+			Push(ESNESkill::Sanity, LOCTEXT("VoiceSanityBroken",
+				"The walls are listening. The customer's smile has too many teeth."));
+		}
+		else if (Sanity >= 4)
+		{
+			Push(ESNESkill::Sanity, LOCTEXT("VoiceSanityHigh",
+				"Something about this item is humming under the surface. You can feel it."));
+		}
+	}
+
+	// MORALITY voice — the conscience that won't shut up
+	if (bInEncounter)
+	{
+		if (Morality <= -3)
+		{
+			Push(ESNESkill::Morality, LOCTEXT("VoiceMoralityFallen",
+				"You stopped flinching weeks ago. Just take their money."));
+		}
+		else if (Morality >= 3)
+		{
+			Push(ESNESkill::Morality, LOCTEXT("VoiceMoralityHigh",
+				"If something is wrong with this sale, you owe it to them to find out."));
+		}
+	}
+
+	// MorningNews framing
+	if (CurrentPhase == ESNEDayPhase::MorningNews)
+	{
+		if (Sanity <= 0)
+		{
+			Push(ESNESkill::Sanity, LOCTEXT("VoiceMorningSanityLow",
+				"You don't remember reading this. You're not sure you read it now."));
+		}
+		if (Morality <= -3)
+		{
+			Push(ESNESkill::Morality, LOCTEXT("VoiceMorningMoralityLow",
+				"Another headline. Another shrug. The shrug used to hurt."));
+		}
+	}
 }
 
 void USNEDialogueGameSubsystem::BuildShiftEncounterPresentation()
@@ -1124,6 +1444,7 @@ void USNEDialogueGameSubsystem::BuildShiftEncounterPresentation()
 	PresentationCache.CustomerTitle = Scenario.Nickname;
 	PresentationCache.ItemTitle = ItemTitle;
 	PresentationCache.VisibleClues = ActiveEncounter.VisibleClues;
+	PresentationCache.SkillAttributedClues = ActiveEncounter.SkillAttributedClues;
 
 	const int32 ResolvedCount = CurrentPhase == ESNEDayPhase::MorningShift ? MorningResolvedCount : EveningResolvedCount;
 	const int32 TargetCount = GetRequiredEncountersForCurrentShift();
@@ -1311,10 +1632,23 @@ void USNEDialogueGameSubsystem::FinalizeCurrentEncounter(const bool bSold)
 		const int32 SaleValue = GetSaleValue(ActiveItem);
 		Money += SaleValue;
 
+		// Tip is now a MONEY skill check instead of a flat probability.
+		// DC is derived from current effective TipChance so existing content tuning
+		// continues to work: 50% TipChance ~= DC 9 (medium), 5% ~= DC 14 (hard).
 		const float EffectiveTipChance = FMath::Clamp(TipChance * Scenario.TipChanceMultiplier, 0.0f, 1.0f);
-		if (RandomStream.FRand() < EffectiveTipChance)
+		FSNESkillCheck TipCheck;
+		TipCheck.Skill = ESNESkill::Money;
+		TipCheck.DifficultyClass = FMath::Clamp(
+			14 - FMath::RoundToInt(EffectiveTipChance * 10.0f),
+			6, 18);
+		TipCheck.bRedCheck = true;
+		TipCheck.ContextLabel = LOCTEXT("TipCheckLabel", "Read the customer for a tip");
+		const FSNESkillCheckResult TipResult = RollSkillCheck(TipCheck);
+		if (TipResult.bPassed)
 		{
-			TipAmount = FMath::RoundToInt(static_cast<float>(SaleValue) * 0.05f);
+			// Margin gives a small payout bonus on big wins.
+			const float MarginBonus = FMath::Clamp(TipResult.Margin * 0.005f, 0.0f, 0.05f);
+			TipAmount = FMath::RoundToInt(static_cast<float>(SaleValue) * (0.05f + MarginBonus));
 			Money += TipAmount;
 		}
 	}
@@ -1909,6 +2243,20 @@ bool USNEDialogueGameSubsystem::SaveToSlot(const FString& SlotName)
 		Root->SetArrayField(TEXT("CustomerHistories"), Arr);
 	}
 
+	// ActiveThoughts (Thought Cabinet)
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (const FSNEActiveThought& A : ActiveThoughts)
+		{
+			TSharedPtr<FJsonObject> T = MakeShared<FJsonObject>();
+			T->SetStringField(TEXT("ThoughtPath"), A.Thought.ToSoftObjectPath().ToString());
+			T->SetNumberField(TEXT("DaysRemaining"), A.DaysRemaining);
+			T->SetBoolField(TEXT("Matured"), A.bMatured);
+			Arr.Add(MakeShared<FJsonValueObject>(T));
+		}
+		Root->SetArrayField(TEXT("ActiveThoughts"), Arr);
+	}
+
 	FString Out;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
 	if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
@@ -2020,6 +2368,21 @@ bool USNEDialogueGameSubsystem::LoadFromSlot(const FString& SlotName)
 			}
 			const FName CustomerId(*O->GetStringField(TEXT("CustomerId")));
 			CustomerHistories.Add(CustomerId, H);
+		}
+	}
+
+	ActiveThoughts.Reset();
+	const TArray<TSharedPtr<FJsonValue>>* ThoughtArr = nullptr;
+	if (Root->TryGetArrayField(TEXT("ActiveThoughts"), ThoughtArr))
+	{
+		for (const TSharedPtr<FJsonValue>& V : *ThoughtArr)
+		{
+			const TSharedPtr<FJsonObject>& O = V->AsObject();
+			FSNEActiveThought A;
+			A.Thought = TSoftObjectPtr<USNEThoughtDataAsset>(FSoftObjectPath(O->GetStringField(TEXT("ThoughtPath"))));
+			A.DaysRemaining = O->GetIntegerField(TEXT("DaysRemaining"));
+			A.bMatured = O->GetBoolField(TEXT("Matured"));
+			ActiveThoughts.Add(A);
 		}
 	}
 

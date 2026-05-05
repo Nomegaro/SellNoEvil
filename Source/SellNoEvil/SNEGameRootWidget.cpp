@@ -396,21 +396,54 @@ void USNEGameRootWidget::UpdateTextBlocks(const FSNEPresentationData& Data)
 
 	if (BodyText != nullptr)
 	{
-		BodyText->SetText(Data.BodyText.IsEmpty() ? LOCTEXT("FallbackBodyVisible", "...") : Data.BodyText);
+		FString Composed;
+		if (Data.SkillCommentary.Num() > 0)
+		{
+			const UEnum* SkillEnum = StaticEnum<ESNESkill>();
+			for (const FSNESkillLine& SkillLine : Data.SkillCommentary)
+			{
+				const FText SkillName = SkillEnum != nullptr
+					? SkillEnum->GetDisplayNameTextByValue(static_cast<int64>(SkillLine.Skill))
+					: FText::FromString(TEXT("VOICE"));
+				Composed += FString::Printf(TEXT("[%s] - %s\n"),
+					*SkillName.ToString(),
+					*SkillLine.Line.ToString());
+			}
+			Composed += TEXT("\n");
+		}
+		Composed += Data.BodyText.IsEmpty()
+			? LOCTEXT("FallbackBodyVisible", "...").ToString()
+			: Data.BodyText.ToString();
+		BodyText->SetText(FText::FromString(Composed));
 	}
 
 	if (ClueText != nullptr)
 	{
-		if (Data.VisibleClues.Num() == 0)
+		if (Data.VisibleClues.Num() == 0 && Data.SkillAttributedClues.Num() == 0)
 		{
 			ClueText->SetVisibility(ESlateVisibility::Collapsed);
 		}
 		else
 		{
 			FString ClueBlock = TEXT("Notes:\n");
-			for (const FText& Clue : Data.VisibleClues)
+			if (Data.SkillAttributedClues.Num() > 0)
 			{
-				ClueBlock += FString::Printf(TEXT("  - %s\n"), *Clue.ToString());
+				const UEnum* SkillEnum = StaticEnum<ESNESkill>();
+				for (const FSNESkillLine& Clue : Data.SkillAttributedClues)
+				{
+					const FText SkillName = SkillEnum != nullptr
+						? SkillEnum->GetDisplayNameTextByValue(static_cast<int64>(Clue.Skill))
+						: FText::FromString(TEXT("VOICE"));
+					ClueBlock += FString::Printf(TEXT("  [%s] - %s\n"),
+						*SkillName.ToString(), *Clue.Line.ToString());
+				}
+			}
+			else
+			{
+				for (const FText& Clue : Data.VisibleClues)
+				{
+					ClueBlock += FString::Printf(TEXT("  - %s\n"), *Clue.ToString());
+				}
 			}
 			ClueText->SetText(FText::FromString(ClueBlock));
 			ClueText->SetVisibility(ESlateVisibility::Visible);

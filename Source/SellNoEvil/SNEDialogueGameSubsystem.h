@@ -27,6 +27,83 @@ enum class ESNEChoiceType : uint8
 	RestartDay
 };
 
+UENUM(BlueprintType)
+enum class ESNESkill : uint8
+{
+	Money      UMETA(DisplayName = "MONEY"),
+	Energy     UMETA(DisplayName = "ENERGY"),
+	Sanity     UMETA(DisplayName = "SANITY"),
+	Morality   UMETA(DisplayName = "MORALITY")
+};
+
+USTRUCT(BlueprintType)
+struct FSNESkillLine
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
+	ESNESkill Skill = ESNESkill::Sanity;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
+	FText Line;
+};
+
+USTRUCT(BlueprintType)
+struct FSNESkillCheck
+{
+	GENERATED_BODY()
+
+	// Which meter is being tested.
+	UPROPERTY(BlueprintReadWrite, Category = "SNE|Check")
+	ESNESkill Skill = ESNESkill::Money;
+
+	// Target number. 6=trivial, 9=easy, 12=medium, 14=hard, 16=heroic, 20=godlike.
+	UPROPERTY(BlueprintReadWrite, Category = "SNE|Check")
+	int32 DifficultyClass = 12;
+
+	// Red checks fire once per encounter and cannot be retried after failure.
+	UPROPERTY(BlueprintReadWrite, Category = "SNE|Check")
+	bool bRedCheck = false;
+
+	// Optional context label (e.g. "Read the customer", "Suppress disgust").
+	UPROPERTY(BlueprintReadWrite, Category = "SNE|Check")
+	FText ContextLabel;
+};
+
+USTRUCT(BlueprintType)
+struct FSNESkillCheckResult
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Check")
+	bool bPassed = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Check")
+	ESNESkill Skill = ESNESkill::Money;
+
+	// 2d6 raw roll (2..12) before modifier.
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Check")
+	int32 DiceRoll = 0;
+
+	// Skill modifier applied (skill meter scaled into [-3, +6]).
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Check")
+	int32 SkillModifier = 0;
+
+	// DiceRoll + SkillModifier.
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Check")
+	int32 Total = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Check")
+	int32 DifficultyClass = 0;
+
+	// Total - DC. Negative = failed by margin.
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Check")
+	int32 Margin = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Check")
+	FText ContextLabel;
+};
+
 USTRUCT(BlueprintType)
 struct FSNEChoiceData
 {
@@ -43,6 +120,17 @@ struct FSNEChoiceData
 
 	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
 	bool bEnabled = true;
+
+	// When true, the choice is locked unless the corresponding skill meter
+	// is at least RequiredValue. The widget shows the lock prefix either way.
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
+	bool bHasSkillRequirement = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
+	ESNESkill RequiredSkill = ESNESkill::Sanity;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
+	int32 RequiredValue = 0;
 };
 
 USTRUCT(BlueprintType)
@@ -93,10 +181,60 @@ struct FSNEPresentationData
 	TArray<FText> VisibleClues;
 
 	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
+	TArray<FSNESkillLine> SkillCommentary;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
+	TArray<FSNESkillLine> SkillAttributedClues;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Presentation")
 	TArray<FSNEChoiceData> Choices;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FSNEPresentationChanged);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FSNEThoughtsChanged);
+
+UCLASS(BlueprintType)
+class SELLNOEVIL_API USNEThoughtDataAsset : public UDataAsset
+{
+	GENERATED_BODY()
+
+public:
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Thought")
+	FText DisplayName;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Thought", meta = (MultiLine = true))
+	FText Description;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Thought")
+	ESNESkill ApplicableSkill = ESNESkill::Sanity;
+
+	// Permanent modifier added to GetSkillModifier(ApplicableSkill) once matured.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Thought")
+	int32 MaturedModifier = 1;
+
+	// In-game days the thought spends internalizing before maturing. >=1.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Thought", meta = (ClampMin = "1"))
+	int32 DaysToInternalize = 2;
+
+	// Penalty applied each day while internalizing (committing to an idea hurts).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SNE|Thought")
+	FSNEMeterDelta DailyInternalizingPenalty;
+};
+
+USTRUCT(BlueprintType)
+struct FSNEActiveThought
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Thought")
+	TSoftObjectPtr<USNEThoughtDataAsset> Thought;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Thought")
+	int32 DaysRemaining = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SNE|Thought")
+	bool bMatured = false;
+};
 
 UCLASS(BlueprintType)
 class SELLNOEVIL_API USNEDialogueGameSubsystem : public UGameInstanceSubsystem
@@ -124,6 +262,13 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "SNE|Flow")
 	bool ResolveSellChoice(bool bSell);
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Check",
+		meta = (ToolTip = "Roll 2d6 + skill modifier vs DifficultyClass. Skill modifier is the corresponding meter scaled into [-3,+6]. The result is also stored as commentary on the next presentation refresh."))
+	FSNESkillCheckResult RollSkillCheck(const FSNESkillCheck& Check);
+
+	UFUNCTION(BlueprintPure, Category = "SNE|Check")
+	int32 GetSkillModifier(ESNESkill Skill) const;
 
 	UFUNCTION(BlueprintCallable, Category = "SNE|Flow")
 	bool ChoosePrepAction(FName ActionId);
@@ -212,6 +357,25 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "SNE|Events")
 	FSNEPresentationChanged OnPresentationChanged;
 
+	UPROPERTY(BlueprintAssignable, Category = "SNE|Events")
+	FSNEThoughtsChanged OnThoughtsChanged;
+
+	// --- Thought Cabinet ---
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Thoughts",
+		meta = (ToolTip = "Begin internalizing a thought. Fails if all slots are full or the same thought is already active. Slots = 1 + Sanity/3, clamped to [1,5]."))
+	bool InternalizeThought(USNEThoughtDataAsset* Thought);
+
+	UFUNCTION(BlueprintCallable, Category = "SNE|Thoughts",
+		meta = (ToolTip = "Drop a thought, freeing its slot. Removes both internalizing and matured thoughts."))
+	bool ForgetThought(USNEThoughtDataAsset* Thought);
+
+	UFUNCTION(BlueprintPure, Category = "SNE|Thoughts")
+	int32 GetThoughtSlots() const;
+
+	UFUNCTION(BlueprintPure, Category = "SNE|Thoughts")
+	TArray<FSNEActiveThought> GetActiveThoughts() const;
+
 private:
 	struct FSNEDelayedOutcomeEntry
 	{
@@ -229,6 +393,7 @@ private:
 		bool bInvestigated = false;
 		bool bResolved = false;
 		TArray<FText> VisibleClues;
+		TArray<FSNESkillLine> SkillAttributedClues;
 	};
 
 	struct FSNECustomerHistory
@@ -246,7 +411,11 @@ private:
 	void ApplyMeterDelta(const FSNEMeterDelta& Delta);
 	void RebuildPresentation();
 	void BuildShiftEncounterPresentation();
+	void AppendSkillCommentary();
 	void StartNextEncounterIfNeeded();
+	void ApplySkillGatesToChoices();
+	void TickThoughts();
+	void ApplyDailyThoughtPenalties();
 	void FinalizeCurrentEncounter(bool bSold);
 	bool AppendDelayedOutcome(const FSNEOutcomeData& Outcome);
 	const FSNEOutcomeData& SelectOutcome(const FSNECustomerVisit& Visit, bool bSell, ESNECustomerIntent Intent) const;
@@ -314,4 +483,13 @@ private:
 
 	UPROPERTY(Transient)
 	TSubclassOf<UUserWidget> PreferredRootWidgetClass;
+
+	// Most recent skill check result. AppendSkillCommentary() surfaces this once,
+	// then clears bHasLastCheckResult so it doesn't echo on every refresh.
+	FSNESkillCheckResult LastCheckResult;
+	bool bHasLastCheckResult = false;
+
+	// Thought Cabinet — active and matured thoughts.
+	UPROPERTY(Transient)
+	TArray<FSNEActiveThought> ActiveThoughts;
 };
