@@ -16,5 +16,5 @@ public:
 	ASNEPrototypeGameMode();
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "SNE|UI")
-	TSubclassOf<UUserWidget> RootWidgetClass;
+	TSoftClassPtr<UUserWidget> RootWidgetClass;
 };

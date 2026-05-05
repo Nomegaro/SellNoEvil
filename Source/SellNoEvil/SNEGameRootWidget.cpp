@@ -157,8 +157,10 @@ void USNEGameRootWidget::EnsureChoiceWidgets(const int32 RequiredCount)
 		return;
 	}
 
-	TSubclassOf<USNEIndexedButton> ButtonClass = ChoiceButtonClass;
-	if (ButtonClass == nullptr)
+	UClass* ButtonClass = ChoiceButtonClass.LoadSynchronous();
+	if (ButtonClass == nullptr
+		|| ButtonClass->HasAnyClassFlags(CLASS_Abstract)
+		|| !ButtonClass->IsChildOf(USNEIndexedButton::StaticClass()))
 	{
 		ButtonClass = USNEIndexedButton::StaticClass();
 	}
@@ -166,15 +168,23 @@ void USNEGameRootWidget::EnsureChoiceWidgets(const int32 RequiredCount)
 	while (ChoiceButtons.Num() < RequiredCount)
 	{
 		const int32 Index = ChoiceButtons.Num();
-		USNEIndexedButton* ChoiceButton = WidgetTree->ConstructWidget<USNEIndexedButton>(ButtonClass, *FString::Printf(TEXT("ChoiceButton%d"), Index));
+		UWidget* RawChoiceButton = WidgetTree->ConstructWidget<UWidget>(ButtonClass, *FString::Printf(TEXT("ChoiceButton%d"), Index));
+		USNEIndexedButton* ChoiceButton = Cast<USNEIndexedButton>(RawChoiceButton);
 		if (ChoiceButton == nullptr)
 		{
+			UE_LOG(LogTemp, Error, TEXT("SNE: Failed to construct choice button from class %s."), *GetNameSafe(ButtonClass));
 			break;
 		}
 		ChoiceButton->SetChoiceIndex(Index);
 		ChoiceButton->OnIndexedClicked.AddDynamic(this, &USNEGameRootWidget::HandleIndexedChoiceClicked);
 
-		UTextBlock* ChoiceLabel = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), *FString::Printf(TEXT("ChoiceLabel%d"), Index));
+		UWidget* RawChoiceLabel = WidgetTree->ConstructWidget<UWidget>(UTextBlock::StaticClass(), *FString::Printf(TEXT("ChoiceLabel%d"), Index));
+		UTextBlock* ChoiceLabel = Cast<UTextBlock>(RawChoiceLabel);
+		if (ChoiceLabel == nullptr)
+		{
+			UE_LOG(LogTemp, Error, TEXT("SNE: Failed to construct choice label widget."));
+			break;
+		}
 		ChoiceLabel->SetAutoWrapText(true);
 		ChoiceLabel->SetJustification(ETextJustify::Center);
 		ChoiceButton->AddChild(ChoiceLabel);

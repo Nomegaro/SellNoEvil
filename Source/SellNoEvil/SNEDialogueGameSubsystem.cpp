@@ -14,12 +14,51 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "SNEGameRootWidget.h"
+#include "UObject/UObjectGlobals.h"
 
 #define LOCTEXT_NAMESPACE "SNEDialogueSubsystem"
 
 namespace SNESubsystemInternal
 {
 	static const TCHAR* DefaultContentAssetPath = TEXT("/Game/Data/DA_SNEPrototypeContent.DA_SNEPrototypeContent");
+	static const TCHAR* DefaultContentAssetPathShort = TEXT("/Game/Data/DA_SNEPrototypeContent");
+	static const TCHAR* DefaultRootWidgetClassPath = TEXT("/Game/UI/WBP_GameRoot.WBP_GameRoot_C");
+
+	static USNEPrototypeContentAsset* TryLoadContentAssetAtPath(const TCHAR* ObjectPath)
+	{
+		UObject* LoadedObject = StaticLoadObject(UObject::StaticClass(), nullptr, ObjectPath);
+		return Cast<USNEPrototypeContentAsset>(LoadedObject);
+	}
+
+	static USNEPrototypeContentAsset* TryLoadAuthoredContentAsset()
+	{
+		if (USNEPrototypeContentAsset* Content = TryLoadContentAssetAtPath(DefaultContentAssetPath))
+		{
+			return Content;
+		}
+
+		// Support both explicit object path and short package path forms.
+		return TryLoadContentAssetAtPath(DefaultContentAssetPathShort);
+	}
+
+	static TSubclassOf<UUserWidget> ResolveFallbackRootWidgetClass()
+	{
+		if (UClass* BlueprintWidgetClass = StaticLoadClass(UUserWidget::StaticClass(), nullptr, DefaultRootWidgetClassPath))
+		{
+			return BlueprintWidgetClass;
+		}
+
+		// Last-resort native fallback only if the native class is concrete.
+		UClass* NativeWidgetClass = USNEGameRootWidget::StaticClass();
+		if (NativeWidgetClass != nullptr
+			&& !NativeWidgetClass->HasAnyClassFlags(CLASS_Abstract)
+			&& NativeWidgetClass->IsChildOf(UUserWidget::StaticClass()))
+		{
+			return NativeWidgetClass;
+		}
+
+		return nullptr;
+	}
 
 	static bool HasMeaningfulDelta(const FSNEMeterDelta& Delta)
 	{
@@ -647,12 +686,41 @@ void USNEDialogueGameSubsystem::EnsureUIForPlayerController(APlayerController* P
 	if (!IsValid(ActiveRootWidget))
 	{
 		TSubclassOf<UUserWidget> WidgetClassToUse = PreferredRootWidgetClass;
-		if (WidgetClassToUse == nullptr || WidgetClassToUse->HasAnyClassFlags(CLASS_Abstract))
+		const UClass* RawWidgetClass = WidgetClassToUse.Get();
+		const bool bWidgetClassInvalid = RawWidgetClass == nullptr
+			|| RawWidgetClass->HasAnyClassFlags(CLASS_Abstract)
+			|| !RawWidgetClass->IsChildOf(UUserWidget::StaticClass())
+			|| !CreateWidgetHelpers::ValidateUserWidgetClass(RawWidgetClass);
+		if (bWidgetClassInvalid)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("SNE: No concrete root widget class set. Assign PreferredRootWidgetClass to a WBP derived from USNEGameRootWidget."));
+			const TSubclassOf<UUserWidget> FallbackWidgetClass = SNESubsystemInternal::ResolveFallbackRootWidgetClass();
+			if (FallbackWidgetClass == nullptr)
+			{
+				UE_LOG(
+					LogTemp,
+					Error,
+					TEXT("SNE: PreferredRootWidgetClass is invalid (%s), and fallback widget class at '%s' could not be loaded."),
+					*GetNameSafe(RawWidgetClass),
+					SNESubsystemInternal::DefaultRootWidgetClassPath);
+				return;
+			}
+
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("SNE: PreferredRootWidgetClass is invalid (%s). Falling back to %s."),
+				*GetNameSafe(RawWidgetClass),
+				*GetNameSafe(FallbackWidgetClass.Get()));
+			WidgetClassToUse = FallbackWidgetClass;
+			RawWidgetClass = WidgetClassToUse.Get();
+		}
+		if (RawWidgetClass == nullptr || !CreateWidgetHelpers::ValidateUserWidgetClass(RawWidgetClass))
+		{
+			UE_LOG(LogTemp, Error, TEXT("SNE: Could not resolve a valid root widget class. UI creation skipped."));
 			return;
 		}
-		ActiveRootWidget = CreateWidget<UUserWidget>(PlayerController, WidgetClassToUse);
+
+		ActiveRootWidget = UUserWidget::CreateWidgetInstance(*PlayerController, WidgetClassToUse, TEXT("SNERootWidget"));
 		if (IsValid(ActiveRootWidget))
 		{
 			ActiveRootWidget->SetVisibility(ESlateVisibility::Visible);
@@ -706,11 +774,30 @@ void USNEDialogueGameSubsystem::EnsureContentLoaded()
 		return;
 	}
 
-	RuntimeContentAsset = LoadObject<USNEPrototypeContentAsset>(nullptr, SNESubsystemInternal::DefaultContentAssetPath);
+	RuntimeContentAsset = SNESubsystemInternal::TryLoadAuthoredContentAsset();
+	if (RuntimeContentAsset == nullptr)
+	{
+		UObject* WrongTypeObject = StaticLoadObject(UObject::StaticClass(), nullptr, SNESubsystemInternal::DefaultContentAssetPath);
+		if (WrongTypeObject != nullptr)
+		{
+			UE_LOG(
+				LogTemp,
+				Error,
+				TEXT("SNE: Object at '%s' is '%s', expected '%s'. Falling back to runtime default content."),
+				SNESubsystemInternal::DefaultContentAssetPath,
+				*GetNameSafe(WrongTypeObject->GetClass()),
+				*USNEPrototypeContentAsset::StaticClass()->GetName());
+		}
+	}
 
 	if (RuntimeContentAsset == nullptr)
 	{
 		RuntimeContentAsset = USNEPrototypeContentAsset::CreateRuntimeDefaultContent(this);
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("SNE: Using runtime default content because authored content asset could not be loaded from '%s'."),
+			SNESubsystemInternal::DefaultContentAssetPath);
 	}
 }
 

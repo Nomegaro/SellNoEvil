@@ -4,6 +4,7 @@
 
 #include "Misc/AutomationTest.h"
 #include "SNEDialogueGameSubsystem.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace SNETestInternal
 {
@@ -247,10 +248,18 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FSNEContentIntegrityTest::RunTest(const FString& Parameters)
 {
-	USNEPrototypeContentAsset* Content = LoadObject<USNEPrototypeContentAsset>(nullptr, TEXT("/Game/Data/DA_SNEPrototypeContent.DA_SNEPrototypeContent"));
+	UObject* LoadedObject = StaticLoadObject(UObject::StaticClass(), nullptr, TEXT("/Game/Data/DA_SNEPrototypeContent.DA_SNEPrototypeContent"));
+	USNEPrototypeContentAsset* Content = Cast<USNEPrototypeContentAsset>(LoadedObject);
 	TestNotNull(TEXT("Authored DA_SNEPrototypeContent should load from /Game/Data/"), Content);
 	if (Content == nullptr)
 	{
+		if (LoadedObject != nullptr)
+		{
+			AddError(FString::Printf(
+				TEXT("Object at /Game/Data/DA_SNEPrototypeContent has wrong type: '%s' (expected '%s')."),
+				*GetNameSafe(LoadedObject->GetClass()),
+				*USNEPrototypeContentAsset::StaticClass()->GetName()));
+		}
 		return false;
 	}
 
